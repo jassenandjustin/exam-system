@@ -24,7 +24,7 @@ services:
       DATABASE_URL: mysql+pymysql://examuser:exampassword@db:3306/exam_system
       JWT_SECRET: your-secret-key-change-in-production
     ports:
-      - "5000:5000"
+      - "15000:15000"
     depends_on:
       - db
     networks:
@@ -34,7 +34,7 @@ services:
     build: ./frontend
     container_name: exam-system-frontend
     ports:
-      - "8080:80"
+      - "15010:80"
     depends_on:
       - backend
     networks:
@@ -44,7 +44,7 @@ services:
     image: nginx:alpine
     container_name: exam-system-nginx
     ports:
-      - "80:80"
+      - "15020:80"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf
     depends_on:
