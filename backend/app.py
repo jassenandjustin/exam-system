@@ -5,7 +5,8 @@ from datetime import timedelta
 import os
 from dotenv import load_dotenv
 
-from models import db
+from models import db, User, UserRole
+import bcrypt
 from routes.users import user_bp
 from routes.questions import question_bp
 from routes.practice import practice_bp
@@ -39,9 +40,25 @@ app.register_blueprint(analysis_bp, url_prefix='/api/analysis')
 app.register_blueprint(taxonomy_bp, url_prefix='/api/taxonomy')
 app.register_blueprint(exam_bp, url_prefix='/api/exam')
 
+def _seed_default_admin():
+    """首次部署时若不存在管理员则自动创建，保证管理后台可登录。"""
+    if User.query.filter_by(role=UserRole.ADMIN).first():
+        return
+    admin = User(
+        username='admin',
+        email='admin@exam.com',
+        password_hash=bcrypt.hashpw(b'admin123', bcrypt.gensalt()).decode('utf-8'),
+        role=UserRole.ADMIN,
+    )
+    db.session.add(admin)
+    db.session.commit()
+    print('Seeded default admin account: admin / admin123')
+
+
 # 创建数据库表
 with app.app_context():
     db.create_all()
+    _seed_default_admin()
 
 # 健康检查
 @app.route('/health', methods=['GET'])

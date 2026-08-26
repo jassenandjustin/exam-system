@@ -9,5 +9,14 @@ export default defineConfig({
     alias: {
       '@': resolve(__dirname, 'src')
     }
+  },
+  // 本地开发时把 /api 转发到本机后端（api.js 使用相对路径 baseURL）
+  server: {
+    proxy: {
+      '/api': {
+        target: 'http://localhost:15000',
+        changeOrigin: true
+      }
+    }
   }
 })

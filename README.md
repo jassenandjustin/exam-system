@@ -30,10 +30,25 @@ npm install
 npm run dev
 ```
 
-### 数据库初始化
+### 数据库说明
+表结构由后端 SQLAlchemy 在应用启动时自动创建（`db.create_all()`），
+无需手动执行 SQL。默认管理员账号也在启动时自动播种：
+
+- 用户名：`admin`
+- 密码：`admin123`（生产环境请立即修改）
+
+### Docker 部署
 ```bash
-cd database
-mysql -u root -p < init.sql
+docker compose up -d --build
+```
+
+访问入口为前端容器 `http://<服务器IP>:15010`（静态页面 + `/api` 反向代理同源转发，
+浏览器无需直连后端）。首次部署如曾用旧版 compose 启动过，需先删除旧的数据库卷以
+重建与 ORM 一致的表结构：
+
+```bash
+docker compose down -v
+docker compose up -d --build
 ```
 
 ## API文档

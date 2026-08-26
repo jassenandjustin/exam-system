@@ -3,7 +3,8 @@
 import axios from 'axios'
 
 const api = axios.create({
-  baseURL: 'http://localhost:15000/api',
+  // 相对路径：同源部署时走 nginx 反代到后端；本地开发由 vite proxy 转发
+  baseURL: '/api',
   timeout: 10000
 })
 
