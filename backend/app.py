@@ -75,4 +75,6 @@ def internal_error(error):
     return jsonify({'error': 'Internal server error'}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True, port=15000)
+    # 必须绑定 0.0.0.0：默认的 127.0.0.1 在容器里只对容器自身可见，
+    # nginx 反代与端口发布都无法连进来
+    app.run(debug=True, host='0.0.0.0', port=15000)
