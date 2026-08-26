@@ -199,7 +199,7 @@ SET foreign_key_checks = 1;
 
 -- 创建默认管理员用户（密码: admin123）
 INSERT IGNORE INTO users (username, email, password_hash, role) VALUES
-('admin', 'admin@exam.com', '$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/X4.S6GqPqPqPqPqPq', 'admin');
+('admin', 'admin@exam.com', '$2b$12$J1AUXRlEddkb8AhxoJkCcOHoCkKh5GVZtD0ABIE2/KnDRGInJhgo6', 'admin');
 
 -- 插入示例学科
 INSERT IGNORE INTO subjects (name, description, icon) VALUES
