@@ -1,0 +1,22 @@
+/* 全局最小样式：把布局交给 Element Plus，避免与原 Vite 模板的 #app 居中样式冲突 */
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  font-family: system-ui, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', Roboto, sans-serif;
+  background: var(--el-bg-color-page, #f5f7fa);
+  color: var(--el-text-color-primary, #303133);
+}
+
+#app {
+  min-height: 100vh;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}

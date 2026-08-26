@@ -1,0 +1,409 @@
+from flask import Blueprint, request, jsonify
+from flask_jwt_extended import jwt_required, get_jwt_identity
+from models import db, User, UserRole, StudyRecord, ErrorNote, Favorite
+from datetime import datetime
+import bcrypt
+
+user_bp = Blueprint('users', __name__)
+
+
+def _require_admin():
+    """Return (user, None) if caller is admin, else (None, (resp, code))."""
+    user_id = int(get_jwt_identity())
+    user = User.query.get(user_id)
+    if not user:
+        return None, (jsonify({'error': 'User not found'}), 404)
+    if user.role != UserRole.ADMIN:
+        return None, (jsonify({'error': 'Admin permission required'}), 403)
+    return user, None
+
+
+#
+@user_bp.route('/register', methods=['POST'])
+def register():
+    data = request.get_json()
+
+    #
+    required_fields = ['username', 'email', 'password']
+    for field in required_fields:
+        if not data.get(field):
+            return jsonify({'error': f'{field} is required'}), 400
+
+    #
+    if User.query.filter_by(username=data['username']).first():
+        return jsonify({'error': 'Username already exists'}), 409
+
+    if User.query.filter_by(email=data['email']).first():
+        return jsonify({'error': 'Email already exists'}), 409
+
+    #
+    hashed_password = bcrypt.hashpw(data['password'].encode('utf-8'), bcrypt.gensalt())
+    new_user = User(
+        username=data['username'],
+        email=data['email'],
+        password_hash=hashed_password.decode('utf-8'),
+        phone=data.get('phone'),
+        role=UserRole.STUDENT
+    )
+
+    try:
+        db.session.add(new_user)
+        db.session.commit()
+        return jsonify({'message': 'User registered successfully', 'user_id': new_user.id}), 201
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': 'Failed to register user'}), 500
+
+#
+@user_bp.route('/login', methods=['POST'])
+def login():
+    data = request.get_json()
+
+    if not data.get('username') or not data.get('password'):
+        return jsonify({'error': 'Username and password are required'}), 400
+
+    user = User.query.filter_by(username=data['username']).first()
+
+    if not user or not bcrypt.checkpw(data['password'].encode('utf-8'), user.password_hash.encode('utf-8')):
+        return jsonify({'error': 'Invalid username or password'}), 401
+
+    #
+    user.last_login = datetime.utcnow()
+    db.session.commit()
+
+    #
+    from flask_jwt_extended import create_access_token
+    access_token = create_access_token(identity=str(user.id))
+
+    return jsonify({
+        'message': 'Login successful',
+        'token': access_token,
+        'user': {
+            'id': user.id,
+            'username': user.username,
+            'email': user.email,
+            'role': user.role.value,
+            'avatar': user.avatar
+        }
+    })
+
+#
+@user_bp.route('/me', methods=['GET'])
+@jwt_required()
+def get_current_user():
+    user_id = int(get_jwt_identity())
+    user = User.query.get(user_id)
+
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+
+    return jsonify({
+        'id': user.id,
+        'username': user.username,
+        'email': user.email,
+        'phone': user.phone,
+        'role': user.role.value,
+        'avatar': user.avatar,
+        'created_at': user.created_at,
+        'last_login': user.last_login
+    })
+
+#
+@user_bp.route('/me', methods=['PUT'])
+@jwt_required()
+def update_user():
+    user_id = int(get_jwt_identity())
+    user = User.query.get(user_id)
+
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+
+    data = request.get_json()
+
+    if data.get('email') and data['email'] != user.email:
+        if User.query.filter_by(email=data['email']).first():
+            return jsonify({'error': 'Email already exists'}), 409
+        user.email = data['email']
+
+    if data.get('phone'):
+        user.phone = data['phone']
+
+    if data.get('avatar'):
+        user.avatar = data['avatar']
+
+    try:
+        db.session.commit()
+        return jsonify({'message': 'User updated successfully'})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': 'Failed to update user'}), 500
+
+#
+@user_bp.route('/<int:user_id>/stats', methods=['GET'])
+@jwt_required()
+def get_user_stats(user_id):
+    current_user_id = int(get_jwt_identity())
+    if current_user_id != user_id:
+        return jsonify({'error': 'Permission denied'}), 403
+
+    #
+    total_practice = StudyRecord.query.filter_by(user_id=user_id).count()
+
+    #
+    correct_practice = StudyRecord.query.filter_by(user_id=user_id, is_correct=True).count()
+    accuracy = (correct_practice / total_practice * 100) if total_practice > 0 else 0
+
+    #
+    error_count = ErrorNote.query.filter_by(user_id=user_id, is_corrected=False).count()
+
+    #
+    favorite_count = Favorite.query.filter_by(user_id=user_id).count()
+
+    #
+    from datetime import timedelta
+    week_ago = datetime.utcnow() - timedelta(days=7)
+    weekly_practice = StudyRecord.query.filter(
+        StudyRecord.user_id == user_id,
+        StudyRecord.practiced_at >= week_ago
+    ).count()
+
+    return jsonify({
+        'total_practice': total_practice,
+        'accuracy': round(accuracy, 2),
+        'error_count': error_count,
+        'favorite_count': favorite_count,
+        'weekly_practice': weekly_practice
+    })
+
+#
+@user_bp.route('/<int:user_id>/progress', methods=['GET'])
+@jwt_required()
+def get_user_progress(user_id):
+    current_user_id = int(get_jwt_identity())
+    if current_user_id != user_id:
+        return jsonify({'error': 'Permission denied'}), 403
+
+    #
+    from models import Subject, Question
+    subjects = Subject.query.all()
+
+    progress_data = []
+    for subject in subjects:
+        total_questions = Question.query.filter_by(subject_id=subject.id).count()
+        practiced_questions = db.session.query(StudyRecord.question_id).distinct().filter(
+            StudyRecord.user_id == user_id,
+            StudyRecord.question_id.in_(
+                db.session.query(Question.id).filter_by(subject_id=subject.id)
+            )
+        ).count()
+
+        progress_data.append({
+            'subject_id': subject.id,
+            'subject_name': subject.name,
+            'total_questions': total_questions,
+            'practiced_questions': practiced_questions,
+            'progress_rate': (practiced_questions / total_questions * 100) if total_questions > 0 else 0
+        })
+
+    return jsonify(progress_data)
+
+#
+@user_bp.route('/sync', methods=['POST'])
+@jwt_required()
+def sync_data():
+    user_id = int(get_jwt_identity())
+    data = request.get_json()
+
+    #
+    if 'study_records' in data:
+        for record in data['study_records']:
+            existing = StudyRecord.query.filter_by(
+                user_id=user_id,
+                question_id=record['question_id'],
+                practiced_at=record['practiced_at']
+            ).first()
+
+            if not existing:
+                new_record = StudyRecord(
+                    user_id=user_id,
+                    question_id=record['question_id'],
+                    is_correct=record['is_correct'],
+                    answer=record.get('answer'),
+                    used_time=record.get('used_time'),
+                    practiced_at=record['practiced_at']
+                )
+                db.session.add(new_record)
+
+    #
+    if 'error_notes' in data:
+        for note in data['error_notes']:
+            existing = ErrorNote.query.filter_by(
+                user_id=user_id,
+                question_id=note['question_id']
+            ).first()
+
+            if not existing:
+                new_note = ErrorNote(
+                    user_id=user_id,
+                    question_id=note['question_id'],
+                    note_content=note.get('note_content'),
+                    is_corrected=note.get('is_corrected', False)
+                )
+                db.session.add(new_note)
+
+    #
+    if 'favorites' in data:
+        for favorite in data['favorites']:
+            existing = Favorite.query.filter_by(
+                user_id=user_id,
+                question_id=favorite['question_id']
+            ).first()
+
+            if not existing:
+                new_favorite = Favorite(
+                    user_id=user_id,
+                    question_id=favorite['question_id'],
+                    created_at=favorite['created_at']
+                )
+                db.session.add(new_favorite)
+
+    try:
+        db.session.commit()
+        return jsonify({'message': 'Data synced successfully'})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': 'Failed to sync data'}), 500
+
+
+# ====== 管理员专用接口 ======
+
+# 列出所有用户（分页 + 搜索）
+@user_bp.route('/admin/users', methods=['GET'])
+@jwt_required()
+def admin_list_users():
+    _admin, err = _require_admin()
+    if err:
+        return err
+
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 20, type=int)
+    search = (request.args.get('search') or '').strip()
+    role = request.args.get('role')
+
+    query = User.query
+    if search:
+        like = f'%{search}%'
+        query = query.filter(
+            db.or_(User.username.like(like), User.email.like(like))
+        )
+    if role:
+        try:
+            query = query.filter(User.role == UserRole(role))
+        except ValueError:
+            return jsonify({'error': f'Unknown role: {role}'}), 400
+
+    pagination = query.order_by(User.id.asc()).paginate(
+        page=page, per_page=per_page, error_out=False
+    )
+    items = [{
+        'id': u.id,
+        'username': u.username,
+        'email': u.email,
+        'phone': u.phone,
+        'role': u.role.value,
+        'created_at': u.created_at,
+        'last_login': u.last_login,
+    } for u in pagination.items]
+    return jsonify({
+        'users': items,
+        'total': pagination.total,
+        'pages': pagination.pages,
+        'current_page': page,
+    })
+
+
+# 修改用户角色
+@user_bp.route('/admin/users/<int:user_id>/role', methods=['PUT'])
+@jwt_required()
+def admin_set_user_role(user_id):
+    admin, err = _require_admin()
+    if err:
+        return err
+
+    if admin.id == user_id:
+        return jsonify({'error': "You can't change your own role"}), 400
+
+    target = User.query.get(user_id)
+    if not target:
+        return jsonify({'error': 'User not found'}), 404
+
+    data = request.get_json() or {}
+    role_str = data.get('role')
+    try:
+        target.role = UserRole(role_str)
+    except (ValueError, TypeError):
+        return jsonify({'error': f'Invalid role: {role_str}'}), 400
+
+    db.session.commit()
+    return jsonify({
+        'message': 'Role updated',
+        'user': {'id': target.id, 'username': target.username, 'role': target.role.value}
+    })
+
+
+# 删除用户
+@user_bp.route('/admin/users/<int:user_id>', methods=['DELETE'])
+@jwt_required()
+def admin_delete_user(user_id):
+    admin, err = _require_admin()
+    if err:
+        return err
+    if admin.id == user_id:
+        return jsonify({'error': "You can't delete yourself"}), 400
+
+    target = User.query.get(user_id)
+    if not target:
+        return jsonify({'error': 'User not found'}), 404
+
+    db.session.delete(target)
+    db.session.commit()
+    return jsonify({'message': 'User deleted'})
+
+
+# 系统总览
+@user_bp.route('/admin/overview', methods=['GET'])
+@jwt_required()
+def admin_overview():
+    _admin, err = _require_admin()
+    if err:
+        return err
+
+    from models import Question, Subject, ExamRecord
+    total_users = User.query.count()
+    by_role = {r.value: User.query.filter_by(role=r).count() for r in UserRole}
+    total_questions = Question.query.count()
+    total_subjects = Subject.query.count()
+    total_practice = StudyRecord.query.count()
+    total_exams = ExamRecord.query.count()
+
+    from datetime import timedelta
+    week_ago = datetime.utcnow() - timedelta(days=7)
+    new_users_week = User.query.filter(User.created_at >= week_ago).count()
+    practice_week = StudyRecord.query.filter(StudyRecord.practiced_at >= week_ago).count()
+
+    return jsonify({
+        'users': {
+            'total': total_users,
+            'by_role': by_role,
+            'new_this_week': new_users_week,
+        },
+        'questions': {
+            'total': total_questions,
+            'subjects': total_subjects,
+        },
+        'activity': {
+            'total_practice': total_practice,
+            'total_exams': total_exams,
+            'practice_this_week': practice_week,
+        }
+    })

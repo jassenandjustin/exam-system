@@ -1,0 +1,61 @@
+version: '3.8'
+
+services:
+  db:
+    image: mysql:8.0
+    container_name: exam-system-db
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: exam_system
+      MYSQL_USER: examuser
+      MYSQL_PASSWORD: exampassword
+    ports:
+      - "3306:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - exam-network
+
+  backend:
+    build: ./backend
+    container_name: exam-system-backend
+    environment:
+      DATABASE_URL: mysql+pymysql://examuser:exampassword@db:3306/exam_system
+      JWT_SECRET: your-secret-key-change-in-production
+    ports:
+      - "5000:5000"
+    depends_on:
+      - db
+    networks:
+      - exam-network
+
+  frontend:
+    build: ./frontend
+    container_name: exam-system-frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    networks:
+      - exam-network
+
+  nginx:
+    image: nginx:alpine
+    container_name: exam-system-nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - exam-network
+
+volumes:
+  db_data:
+
+networks:
+  exam-network:
+    driver: bridge
