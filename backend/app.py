@@ -41,18 +41,26 @@ app.register_blueprint(taxonomy_bp, url_prefix='/api/taxonomy')
 app.register_blueprint(exam_bp, url_prefix='/api/exam')
 
 def _seed_default_admin():
-    """首次部署时若不存在管理员则自动创建，保证管理后台可登录。"""
-    if User.query.filter_by(role=UserRole.ADMIN).first():
-        return
-    admin = User(
-        username='admin',
-        email='admin@exam.com',
-        password_hash=bcrypt.hashpw(b'admin123', bcrypt.gensalt()).decode('utf-8'),
-        role=UserRole.ADMIN,
-    )
-    db.session.add(admin)
-    db.session.commit()
-    print('Seeded default admin account: admin / admin123')
+    """首次部署时若不存在管理员则自动创建，保证管理后台可登录。
+
+    播种失败不应导致应用无法启动（例如遗留库中存在与 ORM 枚举不兼容的
+    脏数据时），记录警告后继续运行。
+    """
+    try:
+        if User.query.filter_by(role=UserRole.ADMIN).first():
+            return
+        admin = User(
+            username='admin',
+            email='admin@exam.com',
+            password_hash=bcrypt.hashpw(b'admin123', bcrypt.gensalt()).decode('utf-8'),
+            role=UserRole.ADMIN,
+        )
+        db.session.add(admin)
+        db.session.commit()
+        print('Seeded default admin account: admin / admin123')
+    except Exception as e:
+        db.session.rollback()
+        print(f'WARNING: default admin seeding failed (app continues to start): {e}')
 
 
 # 创建数据库表
