@@ -108,6 +108,60 @@ def get_current_user():
         'last_login': user.last_login
     })
 
+
+#
+# 注意：密码校验失败用 400 而非 401——前端 axios 拦截器会把 401 当作
+# 登录态失效自动登出，输错原密码不应把用户踢下线。
+#
+@user_bp.route('/change-password', methods=['PUT'])
+@jwt_required()
+def change_password():
+    data = request.get_json()
+    old_password = data.get('old_password', '')
+    new_password = data.get('new_password', '')
+    confirm_password = data.get('confirm_password', '')
+
+    if not old_password or not new_password:
+        return jsonify({'error': 'Original and new passwords are required'}), 400
+    if len(new_password) < 6:
+        return jsonify({'error': 'New password must be at least 6 characters'}), 400
+    if new_password != confirm_password:
+        return jsonify({'error': 'New passwords do not match'}), 400
+
+    user_id = int(get_jwt_identity())
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+
+    if not bcrypt.checkpw(old_password.encode('utf-8'), user.password_hash.encode('utf-8')):
+        return jsonify({'error': 'Original password is incorrect'}), 400
+
+    user.password_hash = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+    db.session.commit()
+    return jsonify({'message': 'Password changed successfully'})
+
+
+#
+@user_bp.route('/me', methods=['DELETE'])
+@jwt_required()
+def delete_account():
+    data = request.get_json()
+    password = data.get('password', '')
+
+    user_id = int(get_jwt_identity())
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+
+    # 密码错误同样用 400，理由同上
+    if not password or not bcrypt.checkpw(password.encode('utf-8'), user.password_hash.encode('utf-8')):
+        return jsonify({'error': 'Password is incorrect'}), 400
+
+    # 学习记录/错题/收藏/考试记录由 ORM 级联删除；创建的试卷保留（created_by 置空）
+    db.session.delete(user)
+    db.session.commit()
+    return jsonify({'message': 'Account deleted successfully'})
+
 #
 @user_bp.route('/me', methods=['PUT'])
 @jwt_required()
