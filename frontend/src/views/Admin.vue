@@ -6,6 +6,7 @@ const tab = ref('users')
 const UserManage = defineAsyncComponent(() => import('./admin/UserManage.vue'))
 const QuestionManage = defineAsyncComponent(() => import('./admin/QuestionManage.vue'))
 const SubjectManage = defineAsyncComponent(() => import('./admin/SubjectManage.vue'))
+const ClassManage = defineAsyncComponent(() => import('./admin/ClassManage.vue'))
 </script>
 
 <template>
@@ -20,6 +21,9 @@ const SubjectManage = defineAsyncComponent(() => import('./admin/SubjectManage.v
       </el-tab-pane>
       <el-tab-pane name="taxonomy" label="学科 / 章节 / 标签">
         <SubjectManage v-if="tab === 'taxonomy'" />
+      </el-tab-pane>
+      <el-tab-pane name="classes" label="班级管理">
+        <ClassManage v-if="tab === 'classes'" />
       </el-tab-pane>
     </el-tabs>
   </div>

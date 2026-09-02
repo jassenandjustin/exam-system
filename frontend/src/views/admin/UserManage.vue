@@ -16,8 +16,11 @@ const query = reactive({
   page: 1,
   per_page: 10,
   search: '',
-  role: ''
+  role: '',
+  status: ''
 })
+
+const classes = ref([])
 
 const roleOptions = [
   { value: '', label: '全部' },
@@ -25,6 +28,24 @@ const roleOptions = [
   { value: 'teacher', label: '教师' },
   { value: 'admin', label: '管理员' }
 ]
+
+const statusOptions = [
+  { value: '', label: '全部状态' },
+  { value: 'pending', label: '待审核' },
+  { value: 'approved', label: '已通过' },
+  { value: 'rejected', label: '已拒绝' }
+]
+
+const statusTagType = {
+  pending: 'warning',
+  approved: 'success',
+  rejected: 'danger'
+}
+const statusLabel = {
+  pending: '待审核',
+  approved: '已通过',
+  rejected: '已拒绝'
+}
 
 const roleTagType = {
   admin: 'danger',
@@ -50,6 +71,7 @@ async function loadUsers() {
     const params = { page: query.page, per_page: query.per_page }
     if (query.search) params.search = query.search
     if (query.role) params.role = query.role
+    if (query.status) params.status = query.status
     const { data } = await api.get('/users/admin/users', { params })
     users.value = data.users
     total.value = data.total
@@ -57,6 +79,15 @@ async function loadUsers() {
     ElMessage.error(err.response?.data?.error || `加载用户列表失败: ${err.message}`)
   } finally {
     tableLoading.value = false
+  }
+}
+
+async function loadClasses() {
+  try {
+    const { data } = await api.get('/classes')
+    classes.value = data
+  } catch {
+    // 班级加载失败不阻塞用户列表，分配班级时再提示
   }
 }
 
@@ -112,9 +143,99 @@ function formatDate(s) {
   }
 }
 
+// ===== 注册审核 =====
+async function setStatus(row, status) {
+  if (status === row.status) return
+  const actionLabel = {
+    approved: '通过',
+    rejected: '拒绝',
+    pending: '重置为待审核'
+  }[status]
+  if (status === 'rejected') {
+    try {
+      await ElMessageBox.confirm(
+        `拒绝用户 "${row.username}" 的注册？该账号将无法登录。`,
+        '拒绝注册',
+        { type: 'warning', confirmButtonText: '拒绝', cancelButtonText: '取消' }
+      )
+    } catch {
+      return
+    }
+  }
+  try {
+    await api.put(`/users/admin/users/${row.id}/status`, { status })
+    ElMessage.success(`已将 ${row.username} ${actionLabel}`)
+    loadUsers()
+  } catch (err) {
+    ElMessage.error(err.response?.data?.error || '操作失败')
+  }
+}
+
+// ===== 重置密码 =====
+async function resetPassword(row) {
+  let value
+  try {
+    const res = await ElMessageBox.prompt(
+      `为用户 "${row.username}" 设置新密码（至少 6 位）：`,
+      '重置密码',
+      {
+        confirmButtonText: '确定',
+        cancelButtonText: '取消',
+        inputType: 'password',
+        inputValidator: (v) => (v && v.length >= 6) || '密码至少 6 位'
+      }
+    )
+    value = res.value
+  } catch {
+    return
+  }
+  try {
+    await api.put(`/users/admin/users/${row.id}/reset-password`, { new_password: value })
+    ElMessage.success(`已重置 ${row.username} 的密码`)
+  } catch (err) {
+    ElMessage.error(err.response?.data?.error || '重置失败')
+  }
+}
+
+// ===== 分配班级 =====
+const assignDlg = reactive({
+  visible: false,
+  user: null,
+  classIds: []
+})
+
+function openAssign(row) {
+  assignDlg.user = row
+  assignDlg.classIds = (row.classes || []).map(c => c.id)
+  assignDlg.visible = true
+}
+
+async function submitAssign() {
+  const row = assignDlg.user
+  if (!row) return
+  if (row.role === 'student' && assignDlg.classIds.length > 1) {
+    ElMessage.error('学生只能属于一个班级')
+    return
+  }
+  try {
+    await api.put(`/users/admin/users/${row.id}/class`, { class_ids: assignDlg.classIds })
+    ElMessage.success('班级已更新')
+    assignDlg.visible = false
+    loadUsers()
+  } catch (err) {
+    ElMessage.error(err.response?.data?.error || '分配班级失败')
+  }
+}
+
+function classNames(row) {
+  const names = (row.classes || []).map(c => c.name)
+  return names.length ? names.join('、') : '—'
+}
+
 onMounted(() => {
   loadOverview()
   loadUsers()
+  loadClasses()
 })
 </script>
 
@@ -179,6 +300,9 @@ onMounted(() => {
             <el-select v-model="query.role" placeholder="角色" style="width: 120px" @change="onSearch">
               <el-option v-for="o in roleOptions" :key="o.value" :value="o.value" :label="o.label" />
             </el-select>
+            <el-select v-model="query.status" placeholder="状态" style="width: 120px" @change="onSearch">
+              <el-option v-for="o in statusOptions" :key="o.value" :value="o.value" :label="o.label" />
+            </el-select>
             <el-button type="primary" @click="onSearch">查询</el-button>
             <el-button @click="loadUsers">刷新</el-button>
           </div>
@@ -192,26 +316,66 @@ onMounted(() => {
         <el-table-column prop="phone" label="手机" width="130">
           <template #default="{ row }">{{ row.phone || '—' }}</template>
         </el-table-column>
-        <el-table-column label="角色" width="120">
+        <el-table-column label="角色" width="100">
           <template #default="{ row }">
             <el-tag :type="roleTagType[row.role]" effect="light">{{ row.role }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="注册时间" width="180">
+        <el-table-column label="状态" width="100">
+          <template #default="{ row }">
+            <el-tag :type="statusTagType[row.status]" effect="light">
+              {{ statusLabel[row.status] || row.status }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="班级" min-width="140">
+          <template #default="{ row }">{{ classNames(row) }}</template>
+        </el-table-column>
+        <el-table-column label="注册时间" width="170">
           <template #default="{ row }">{{ formatDate(row.created_at) }}</template>
         </el-table-column>
-        <el-table-column label="最近登录" width="180">
+        <el-table-column label="最近登录" width="170">
           <template #default="{ row }">{{ formatDate(row.last_login) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="260" fixed="right">
+        <el-table-column label="操作" width="340" fixed="right">
           <template #default="{ row }">
+            <el-dropdown
+              :disabled="row.id === auth.userId"
+              trigger="click"
+              @command="(c) => setStatus(row, c)"
+            >
+              <el-button size="small" :disabled="row.id === auth.userId">
+                审核<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+              </el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="approved" :disabled="row.status === 'approved'">通过</el-dropdown-item>
+                  <el-dropdown-item command="rejected" :disabled="row.status === 'rejected'">拒绝</el-dropdown-item>
+                  <el-dropdown-item command="pending" :disabled="row.status === 'pending'" divided>重置为待审核</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+            <el-button
+              size="small"
+              :disabled="row.id === auth.userId"
+              @click="openAssign(row)"
+            >
+              分配班级
+            </el-button>
+            <el-button
+              size="small"
+              :disabled="row.id === auth.userId"
+              @click="resetPassword(row)"
+            >
+              重置密码
+            </el-button>
             <el-dropdown
               :disabled="row.id === auth.userId"
               trigger="click"
               @command="(c) => changeRole(row, c)"
             >
               <el-button size="small" :disabled="row.id === auth.userId">
-                修改角色<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+                角色<el-icon class="el-icon--right"><ArrowDown /></el-icon>
               </el-button>
               <template #dropdown>
                 <el-dropdown-menu>
@@ -243,6 +407,30 @@ onMounted(() => {
         @current-change="onPageChange"
       />
     </el-card>
+
+    <!-- 分配班级对话框 -->
+    <el-dialog v-model="assignDlg.visible" title="分配班级" width="480px">
+      <template v-if="assignDlg.user">
+        <p class="assign-tip">
+          {{ assignDlg.user.username }}（{{ assignDlg.user.role === 'student' ? '学生，只能属于一个班级' : '教师，可任教多个班级' }}）
+        </p>
+        <el-select
+          v-model="assignDlg.classIds"
+          :multiple="assignDlg.user.role !== 'student'"
+          placeholder="选择班级"
+          style="width: 100%"
+        >
+          <el-option v-for="c in classes" :key="c.id" :value="c.id" :label="c.name" />
+        </el-select>
+        <p class="assign-tip sub">
+          学生未入班将无法刷题和考试；班级学科范围决定其可用的学科内容。
+        </p>
+      </template>
+      <template #footer>
+        <el-button @click="assignDlg.visible = false">取消</el-button>
+        <el-button type="primary" @click="submitAssign">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -281,5 +469,14 @@ onMounted(() => {
   margin-top: 12px;
   display: flex;
   justify-content: flex-end;
+}
+.assign-tip {
+  margin: 0 0 12px;
+  font-size: 14px;
+}
+.assign-tip.sub {
+  margin: 12px 0 0;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
 </style>

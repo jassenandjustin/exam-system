@@ -36,6 +36,9 @@ class User(db.Model):
     phone = db.Column(db.String(20), unique=True, nullable=True)
     password_hash = db.Column(db.String(255), nullable=False)
     role = db.Column(db.Enum(UserRole), default=UserRole.STUDENT)
+    # 注册审核：pending（待审核）/ approved（已通过）/ rejected（已拒绝）
+    # 用 String 而非 Enum：规避 SQLAlchemy 枚举与 MySQL 存量表结构变更的兼容问题
+    status = db.Column(db.String(20), nullable=False, default='approved', server_default='approved')
     avatar = db.Column(db.String(255), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -46,6 +49,7 @@ class User(db.Model):
     error_notes = db.relationship('ErrorNote', backref='user', lazy=True, cascade='all, delete-orphan')
     favorites = db.relationship('Favorite', backref='user', lazy=True, cascade='all, delete-orphan')
     exam_records = db.relationship('ExamRecord', backref='user', lazy=True, cascade='all, delete-orphan')
+    class_memberships = db.relationship('ClassMember', backref='user', lazy=True, cascade='all, delete-orphan')
 
 class Subject(db.Model):
     __tablename__ = 'subjects'
@@ -59,6 +63,34 @@ class Subject(db.Model):
     # 关系
     chapters = db.relationship('Chapter', backref='subject', lazy=True, cascade='all, delete-orphan')
     questions = db.relationship('Question', backref='subject', lazy=True)
+
+# 班级-学科 多对多关联（班级可刷题的学科范围）
+class_subjects = db.Table('class_subjects',
+    db.Column('class_id', db.Integer, db.ForeignKey('classes.id'), primary_key=True),
+    db.Column('subject_id', db.Integer, db.ForeignKey('subjects.id'), primary_key=True)
+)
+
+class SchoolClass(db.Model):
+    __tablename__ = 'classes'   # 避开 Python 内置名 Class
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(50), unique=True, nullable=False)
+    description = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    # 关系（成员角色由 join users.role 推导，不冗余存列，避免管理员改角色后失同步）
+    members = db.relationship('ClassMember', backref='school_class', lazy=True, cascade='all, delete-orphan')
+    subjects = db.relationship('Subject', secondary='class_subjects', lazy=True)
+
+class ClassMember(db.Model):
+    __tablename__ = 'class_members'
+
+    id = db.Column(db.Integer, primary_key=True)
+    class_id = db.Column(db.Integer, db.ForeignKey('classes.id'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    joined_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    __table_args__ = (db.UniqueConstraint('class_id', 'user_id', name='uq_class_member'),)
 
 class Chapter(db.Model):
     __tablename__ = 'chapters'

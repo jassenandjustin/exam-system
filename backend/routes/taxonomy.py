@@ -6,6 +6,8 @@ from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from models import db, Subject, Chapter, Tag, Question, QuestionTag, User, UserRole
 
+from access import allowed_subject_ids
+
 taxonomy_bp = Blueprint('taxonomy', __name__)
 
 
@@ -28,7 +30,17 @@ def _require_editor():
 @taxonomy_bp.route('/subjects', methods=['GET'])
 @jwt_required(optional=True)
 def list_subjects():
-    items = Subject.query.order_by(Subject.id.asc()).all()
+    query = Subject.query
+    # 学生只能看到自己班级学科范围内的学科；匿名/教师/管理员不受限
+    identity = get_jwt_identity()
+    if identity is not None:
+        user = User.query.get(int(identity))
+        allowed = allowed_subject_ids(user)
+        if allowed is not None:
+            if not allowed:
+                return jsonify([])
+            query = query.filter(Subject.id.in_(allowed))
+    items = query.order_by(Subject.id.asc()).all()
     return jsonify([{
         'id': s.id,
         'name': s.name,

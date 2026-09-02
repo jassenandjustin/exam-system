@@ -4,6 +4,8 @@ from models import db, Question, QuestionType, StudyRecord, ErrorNote, Favorite,
 from datetime import datetime, timedelta
 import random
 
+from access import current_user, allowed_subject_ids, gate_subject, gate_question
+
 practice_bp = Blueprint('practice', __name__)
 
 
@@ -42,7 +44,7 @@ def _favorite_id_set(user_id, question_ids):
 @practice_bp.route('/sequential', methods=['GET'])
 @jwt_required()
 def sequential_practice():
-    user_id = int(get_jwt_identity())
+    user = current_user()
     subject_id = request.args.get('subject_id', type=int)
     chapter_id = request.args.get('chapter_id', type=int)
     page = request.args.get('page', 1, type=int)
@@ -51,6 +53,11 @@ def sequential_practice():
     if not subject_id:
         return jsonify({'error': 'subject_id is required'}), 400
 
+    gate_err = gate_subject(user, subject_id)
+    if gate_err:
+        return gate_err
+
+    user_id = user.id
     #
     practiced_question_ids = db.session.query(StudyRecord.question_id).filter_by(
         user_id=user_id
@@ -82,12 +89,18 @@ def sequential_practice():
 @practice_bp.route('/random', methods=['GET'])
 @jwt_required()
 def random_practice():
-    user_id = int(get_jwt_identity())
+    user = current_user()
     subject_id = request.args.get('subject_id', type=int)
     count = request.args.get('count', 10, type=int)
 
     if not subject_id:
         return jsonify({'error': 'subject_id is required'}), 400
+
+    gate_err = gate_subject(user, subject_id)
+    if gate_err:
+        return gate_err
+
+    user_id = user.id
 
     if count > 50:
         count = 50
@@ -119,9 +132,14 @@ def random_practice():
 @practice_bp.route('/error-review', methods=['GET'])
 @jwt_required()
 def error_review():
-    user_id = int(get_jwt_identity())
+    user = current_user()
     subject_id = request.args.get('subject_id', type=int)
     limit = request.args.get('limit', 20, type=int)
+
+    user_id = user.id
+    allowed = allowed_subject_ids(user)
+    if allowed is not None and not allowed:
+        return jsonify({'error': '请先加入班级后再使用该功能'}), 403
 
     #
     error_query = db.session.query(StudyRecord.question_id).filter_by(
@@ -129,7 +147,12 @@ def error_review():
     ).distinct()
 
     if subject_id:
+        if allowed is not None and subject_id not in allowed:
+            return jsonify({'error': '该学科不在你的班级学科范围内'}), 403
         error_query = error_query.join(Question).filter(Question.subject_id == subject_id)
+    elif allowed is not None:
+        # 不传 subject 时也不能看到班级学科范围外的错题
+        error_query = error_query.join(Question).filter(Question.subject_id.in_(allowed))
 
     error_question_ids = [q[0] for q in error_query.limit(limit).all()]
 
@@ -147,16 +170,26 @@ def error_review():
 @practice_bp.route('/favorites', methods=['GET'])
 @jwt_required()
 def favorite_practice():
-    user_id = int(get_jwt_identity())
+    user = current_user()
     subject_id = request.args.get('subject_id', type=int)
     page = request.args.get('page', 1, type=int)
     per_page = request.args.get('per_page', 10, type=int)
+
+    user_id = user.id
+    allowed = allowed_subject_ids(user)
+    if allowed is not None and not allowed:
+        return jsonify({'error': '请先加入班级后再使用该功能'}), 403
 
     #
     favorite_query = db.session.query(Favorite.question_id).filter_by(user_id=user_id)
 
     if subject_id:
+        if allowed is not None and subject_id not in allowed:
+            return jsonify({'error': '该学科不在你的班级学科范围内'}), 403
         favorite_query = favorite_query.join(Question).filter(Question.subject_id == subject_id)
+    elif allowed is not None:
+        # 不传 subject 时也不能看到班级学科范围外的收藏
+        favorite_query = favorite_query.join(Question).filter(Question.subject_id.in_(allowed))
 
     pagination = favorite_query.paginate(page=page, per_page=per_page, error_out=False)
 
@@ -178,13 +211,23 @@ def favorite_practice():
 @practice_bp.route('/submit-answer', methods=['POST'])
 @jwt_required()
 def submit_answer():
-    user_id = int(get_jwt_identity())
+    user = current_user()
     data = request.get_json()
 
     required_fields = ['question_id', 'answer', 'is_correct']
     for field in required_fields:
         if field not in data:
             return jsonify({'error': f'{field} is required'}), 400
+
+    question = Question.query.get(data['question_id'])
+    if not question:
+        return jsonify({'error': 'Question not found'}), 404
+
+    gate_err = gate_question(user, question)
+    if gate_err:
+        return gate_err
+
+    user_id = user.id
 
     try:
         #
@@ -230,14 +273,21 @@ def submit_answer():
 @jwt_required()
 def add_favorite():
     """收藏一道题。幂等：已收藏则直接返回 ok。"""
-    user_id = int(get_jwt_identity())
+    user = current_user()
     data = request.get_json() or {}
     question_id = data.get('question_id')
     if not question_id:
         return jsonify({'error': 'question_id is required'}), 400
 
-    if not Question.query.get(question_id):
+    question = Question.query.get(question_id)
+    if not question:
         return jsonify({'error': 'Question not found'}), 404
+
+    gate_err = gate_question(user, question)
+    if gate_err:
+        return gate_err
+
+    user_id = user.id
 
     existing = Favorite.query.filter_by(user_id=user_id, question_id=question_id).first()
     if existing:
@@ -273,12 +323,22 @@ def remove_favorite(question_id):
 @practice_bp.route('/chapter-practice', methods=['GET'])
 @jwt_required()
 def chapter_practice():
-    user_id = int(get_jwt_identity())
+    user = current_user()
     chapter_id = request.args.get('chapter_id', type=int)
     limit = request.args.get('limit', 20, type=int)
 
     if not chapter_id:
         return jsonify({'error': 'chapter_id is required'}), 400
+
+    chapter = Chapter.query.get(chapter_id)
+    if not chapter:
+        return jsonify({'error': 'Chapter not found'}), 404
+
+    gate_err = gate_subject(user, chapter.subject_id)
+    if gate_err:
+        return gate_err
+
+    user_id = user.id
 
     #
     questions = Question.query.filter_by(chapter_id=chapter_id).limit(limit).all()
@@ -322,12 +382,18 @@ def get_practice_stats():
 @practice_bp.route('/smart-recommend', methods=['GET'])
 @jwt_required()
 def smart_recommend():
-    user_id = int(get_jwt_identity())
+    user = current_user()
     subject_id = request.args.get('subject_id', type=int)
     limit = request.args.get('limit', 10, type=int)
 
     if not subject_id:
         return jsonify({'error': 'subject_id is required'}), 400
+
+    gate_err = gate_subject(user, subject_id)
+    if gate_err:
+        return gate_err
+
+    user_id = user.id
 
     #
     from models import Tag, QuestionTag

@@ -5,7 +5,7 @@ from datetime import timedelta
 import os
 from dotenv import load_dotenv
 
-from models import db, User, UserRole
+from models import db, User, UserRole, SchoolClass, ClassMember, Subject, class_subjects
 import bcrypt
 from routes.users import user_bp
 from routes.questions import question_bp
@@ -13,6 +13,7 @@ from routes.practice import practice_bp
 from routes.analysis import analysis_bp
 from routes.taxonomy import taxonomy_bp
 from routes.exam import exam_bp
+from routes.classes import class_bp
 
 load_dotenv()
 
@@ -39,6 +40,7 @@ app.register_blueprint(practice_bp, url_prefix='/api/practice')
 app.register_blueprint(analysis_bp, url_prefix='/api/analysis')
 app.register_blueprint(taxonomy_bp, url_prefix='/api/taxonomy')
 app.register_blueprint(exam_bp, url_prefix='/api/exam')
+app.register_blueprint(class_bp, url_prefix='/api/classes')
 
 def _seed_default_admin():
     """首次部署时若不存在管理员则自动创建，保证管理后台可登录。
@@ -63,10 +65,60 @@ def _seed_default_admin():
         print(f'WARNING: default admin seeding failed (app continues to start): {e}')
 
 
+def _ensure_schema_migrations():
+    """create_all 只建缺失表、不会给已存在的表加新列；此处做轻量列迁移。
+
+    兼容 SQLite（本地开发）与 MySQL（云端部署）——用方言无关的 inspector
+    检查列是否存在，缺则 ALTER TABLE ADD COLUMN（带 DEFAULT，存量行立即生效）。
+    """
+    try:
+        inspector = db.inspect(db.engine)
+        cols = [c['name'] for c in inspector.get_columns('users')]
+        if 'status' not in cols:
+            db.session.execute(db.text(
+                "ALTER TABLE users ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'approved'"
+            ))
+            db.session.commit()
+            print("Migrated: users.status added (existing users default to 'approved')")
+    except Exception as e:
+        db.session.rollback()
+        print(f'WARNING: schema migration failed: {e}')
+
+
+def _seed_default_class():
+    """存量库升级保护：把已有的无班级学生纳入一个包含全部学科的默认班级。
+
+    学生未入班将无法刷题/考试；为避免升级把存量学生锁死，在班级体系
+    首次启用时自动迁移。条件不满足（无学生/已有班级成员/无学科）则跳过，幂等。
+    """
+    try:
+        students = User.query.filter_by(role=UserRole.STUDENT).all()
+        if not students or ClassMember.query.first() or Subject.query.count() == 0:
+            return
+        default_class = SchoolClass(
+            name='默认班级',
+            description='系统升级自动创建，包含全部学科',
+        )
+        db.session.add(default_class)
+        db.session.flush()
+        for subject in Subject.query.all():
+            db.session.execute(class_subjects.insert().values(
+                class_id=default_class.id, subject_id=subject.id))
+        for student in students:
+            db.session.add(ClassMember(class_id=default_class.id, user_id=student.id))
+        db.session.commit()
+        print(f'Seeded default class for {len(students)} existing students')
+    except Exception as e:
+        db.session.rollback()
+        print(f'WARNING: default class seeding failed: {e}')
+
+
 # 创建数据库表
 with app.app_context():
     db.create_all()
+    _ensure_schema_migrations()
     _seed_default_admin()
+    _seed_default_class()
 
 # 健康检查
 @app.route('/health', methods=['GET'])

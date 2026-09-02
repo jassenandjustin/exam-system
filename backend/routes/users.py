@@ -1,10 +1,33 @@
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from models import db, User, UserRole, StudyRecord, ErrorNote, Favorite
+from models import db, User, UserRole, StudyRecord, ErrorNote, Favorite, SchoolClass, ClassMember
 from datetime import datetime
 import bcrypt
 
 user_bp = Blueprint('users', __name__)
+
+
+def _classes_of(user_id):
+    """用户的班级列表 [{id, name}]。"""
+    rows = (db.session.query(SchoolClass.id, SchoolClass.name)
+            .join(ClassMember, ClassMember.class_id == SchoolClass.id)
+            .filter(ClassMember.user_id == user_id)
+            .order_by(SchoolClass.id.asc()).all())
+    return [{'id': r[0], 'name': r[1]} for r in rows]
+
+
+def _classes_for_users(user_ids):
+    """批量查询多个用户的班级，返回 {user_id: [{id, name}]}，避免 N+1。"""
+    result = {uid: [] for uid in user_ids}
+    if not user_ids:
+        return result
+    rows = (db.session.query(ClassMember.user_id, SchoolClass.id, SchoolClass.name)
+            .join(SchoolClass, SchoolClass.id == ClassMember.class_id)
+            .filter(ClassMember.user_id.in_(user_ids))
+            .order_by(SchoolClass.id.asc()).all())
+    for uid, cid, cname in rows:
+        result[uid].append({'id': cid, 'name': cname})
+    return result
 
 
 def _require_admin():
@@ -29,6 +52,27 @@ def register():
         if not data.get(field):
             return jsonify({'error': f'{field} is required'}), 400
 
+    if len(data['password']) < 6:
+        return jsonify({'error': 'Password must be at least 6 characters'}), 400
+
+    # 角色与班级：仅允许注册学生/教师，admin 只能由管理员后台设置
+    role_str = data.get('role', 'student')
+    if role_str not in ('student', 'teacher'):
+        return jsonify({'error': 'Invalid role for registration'}), 400
+
+    class_ids = data.get('class_ids')
+    if class_ids is None:
+        class_ids = []
+    if not isinstance(class_ids, list):
+        return jsonify({'error': 'class_ids must be a list'}), 400
+    class_ids = list(set(class_ids))
+    valid_classes = (SchoolClass.query.filter(SchoolClass.id.in_(class_ids)).all()
+                     if class_ids else [])
+    if len(valid_classes) != len(class_ids):
+        return jsonify({'error': 'Invalid class id'}), 400
+    if role_str == 'student' and len(class_ids) != 1:
+        return jsonify({'error': 'Student registration requires exactly one class'}), 400
+
     #
     if User.query.filter_by(username=data['username']).first():
         return jsonify({'error': 'Username already exists'}), 409
@@ -43,13 +87,17 @@ def register():
         email=data['email'],
         password_hash=hashed_password.decode('utf-8'),
         phone=data.get('phone'),
-        role=UserRole.STUDENT
+        role=UserRole(role_str),
+        status='pending',  # 注册后需管理员审核通过才可登录
     )
+    db.session.add(new_user)
+    db.session.flush()
+    for cls in valid_classes:
+        db.session.add(ClassMember(class_id=cls.id, user_id=new_user.id))
 
     try:
-        db.session.add(new_user)
         db.session.commit()
-        return jsonify({'message': 'User registered successfully', 'user_id': new_user.id}), 201
+        return jsonify({'message': '注册成功，请等待管理员审核', 'user_id': new_user.id}), 201
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': 'Failed to register user'}), 500
@@ -67,6 +115,12 @@ def login():
     if not user or not bcrypt.checkpw(data['password'].encode('utf-8'), user.password_hash.encode('utf-8')):
         return jsonify({'error': 'Invalid username or password'}), 401
 
+    # 注册审核：未通过的用户不发 token（用 403，避免触发前端 401 全局登出）
+    if user.status == 'pending':
+        return jsonify({'error': '账号正在审核中，请等待管理员审核通过后登录'}), 403
+    if user.status == 'rejected':
+        return jsonify({'error': '账号审核未通过，请联系管理员'}), 403
+
     #
     user.last_login = datetime.utcnow()
     db.session.commit()
@@ -83,7 +137,9 @@ def login():
             'username': user.username,
             'email': user.email,
             'role': user.role.value,
-            'avatar': user.avatar
+            'status': user.status,
+            'avatar': user.avatar,
+            'classes': _classes_of(user.id)
         }
     })
 
@@ -103,7 +159,9 @@ def get_current_user():
         'email': user.email,
         'phone': user.phone,
         'role': user.role.value,
+        'status': user.status,
         'avatar': user.avatar,
+        'classes': _classes_of(user.id),
         'created_at': user.created_at,
         'last_login': user.last_login
     })
@@ -343,6 +401,7 @@ def admin_list_users():
     per_page = request.args.get('per_page', 20, type=int)
     search = (request.args.get('search') or '').strip()
     role = request.args.get('role')
+    status = request.args.get('status')
 
     query = User.query
     if search:
@@ -355,16 +414,23 @@ def admin_list_users():
             query = query.filter(User.role == UserRole(role))
         except ValueError:
             return jsonify({'error': f'Unknown role: {role}'}), 400
+    if status:
+        if status not in ('pending', 'approved', 'rejected'):
+            return jsonify({'error': f'Unknown status: {status}'}), 400
+        query = query.filter(User.status == status)
 
     pagination = query.order_by(User.id.asc()).paginate(
         page=page, per_page=per_page, error_out=False
     )
+    classes_by_user = _classes_for_users([u.id for u in pagination.items])
     items = [{
         'id': u.id,
         'username': u.username,
         'email': u.email,
         'phone': u.phone,
         'role': u.role.value,
+        'status': u.status,
+        'classes': classes_by_user.get(u.id, []),
         'created_at': u.created_at,
         'last_login': u.last_login,
     } for u in pagination.items]
@@ -398,10 +464,110 @@ def admin_set_user_role(user_id):
     except (ValueError, TypeError):
         return jsonify({'error': f'Invalid role: {role_str}'}), 400
 
+    # 改为学生时若残留多个班级成员关系，截断为最早加入的一个
+    if target.role == UserRole.STUDENT and len(target.class_memberships) > 1:
+        keep = sorted(target.class_memberships, key=lambda m: m.id)[0]
+        for membership in list(target.class_memberships):
+            if membership.id != keep.id:
+                db.session.delete(membership)
+
     db.session.commit()
     return jsonify({
         'message': 'Role updated',
         'user': {'id': target.id, 'username': target.username, 'role': target.role.value}
+    })
+
+
+# 审核用户（通过/拒绝/重置为待审核）
+@user_bp.route('/admin/users/<int:user_id>/status', methods=['PUT'])
+@jwt_required()
+def admin_set_user_status(user_id):
+    admin, err = _require_admin()
+    if err:
+        return err
+
+    if admin.id == user_id:
+        return jsonify({'error': "You can't change your own status"}), 400
+
+    target = User.query.get(user_id)
+    if not target:
+        return jsonify({'error': 'User not found'}), 404
+
+    data = request.get_json() or {}
+    status = data.get('status')
+    if status not in ('pending', 'approved', 'rejected'):
+        return jsonify({'error': 'Invalid status, must be pending/approved/rejected'}), 400
+
+    target.status = status
+    db.session.commit()
+    return jsonify({
+        'message': 'Status updated',
+        'user': {'id': target.id, 'username': target.username, 'status': target.status}
+    })
+
+
+# 重置用户密码（管理员指定新密码）
+@user_bp.route('/admin/users/<int:user_id>/reset-password', methods=['PUT'])
+@jwt_required()
+def admin_reset_password(user_id):
+    admin, err = _require_admin()
+    if err:
+        return err
+
+    if admin.id == user_id:
+        return jsonify({'error': "You can't reset your own password here, use change-password instead"}), 400
+
+    target = User.query.get(user_id)
+    if not target:
+        return jsonify({'error': 'User not found'}), 404
+
+    data = request.get_json() or {}
+    new_password = data.get('new_password') or ''
+    if len(new_password) < 6:
+        return jsonify({'error': 'New password must be at least 6 characters'}), 400
+
+    target.password_hash = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+    db.session.commit()
+    return jsonify({'message': '密码已重置'})
+
+
+# 分配班级（学生单班 / 教师多班，class_ids 全量替换；空数组 = 移出所有班级）
+@user_bp.route('/admin/users/<int:user_id>/class', methods=['PUT'])
+@jwt_required()
+def admin_set_user_class(user_id):
+    admin, err = _require_admin()
+    if err:
+        return err
+
+    target = User.query.get(user_id)
+    if not target:
+        return jsonify({'error': 'User not found'}), 404
+
+    if target.role == UserRole.ADMIN:
+        return jsonify({'error': '管理员不属于任何班级'}), 400
+
+    data = request.get_json() or {}
+    class_ids = data.get('class_ids')
+    if class_ids is None:
+        class_ids = []
+    if not isinstance(class_ids, list):
+        return jsonify({'error': 'class_ids must be a list'}), 400
+    class_ids = list(set(class_ids))
+    if target.role == UserRole.STUDENT and len(class_ids) > 1:
+        return jsonify({'error': '学生只能属于一个班级'}), 400
+
+    valid_classes = (SchoolClass.query.filter(SchoolClass.id.in_(class_ids)).all()
+                     if class_ids else [])
+    if len(valid_classes) != len(class_ids):
+        return jsonify({'error': 'Invalid class id'}), 400
+
+    ClassMember.query.filter_by(user_id=user_id).delete()
+    for cls in valid_classes:
+        db.session.add(ClassMember(class_id=cls.id, user_id=user_id))
+    db.session.commit()
+    return jsonify({
+        'message': '班级已更新',
+        'user': {'id': target.id, 'username': target.username, 'classes': _classes_of(user_id)}
     })
 
 

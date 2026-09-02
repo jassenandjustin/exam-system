@@ -18,6 +18,8 @@ from models import (
 )
 from datetime import datetime, timedelta
 
+from access import allowed_subject_ids
+
 exam_bp = Blueprint('exam', __name__)
 
 
@@ -648,14 +650,44 @@ def chapter_stats(subject_id):
 
 # ============ 学生端：获取可用试卷 ============
 
+def _paper_subject_ids(paper):
+    """试卷涉及的学科集合：优先用抽题规则的 subject_id，无规则回退到
+    已固定题目（ExamQuestion → Question.subject_id）。用于班级学科范围判定。"""
+    rule_subjects = {r.subject_id for r in paper.question_rules}
+    if rule_subjects:
+        return rule_subjects
+    eqs = ExamQuestion.query.filter_by(exam_id=paper.id).all()
+    qids = [eq.question_id for eq in eqs]
+    if not qids:
+        return set()
+    return {q.subject_id for q in Question.query.filter(Question.id.in_(qids)).all()}
+
+
+def _exam_subject_gate_err(user, paper):
+    """学生班级学科范围 ⊇ 试卷学科 才能考试；教师/管理员豁免。"""
+    allowed = allowed_subject_ids(user)
+    if allowed is None:
+        return None
+    if not allowed:
+        return (jsonify({'error': '请先加入班级后再使用该功能'}), 403)
+    paper_subjects = _paper_subject_ids(paper)
+    if not paper_subjects or paper_subjects <= allowed:
+        return None
+    return (jsonify({'error': '该试卷包含你班级学科范围以外的内容'}), 403)
+
+
 @exam_bp.route('/available', methods=['GET'])
 @jwt_required()
 def list_available_exams():
     """学生获取已发布的试卷列表。"""
+    user = _current_user()
     papers = Exam.query.filter_by(is_published=True).order_by(desc(Exam.created_at)).all()
-    user_id = int(get_jwt_identity())
+    user_id = user.id
     items = []
     for p in papers:
+        gate_err = _exam_subject_gate_err(user, p)
+        if gate_err:
+            continue  # 范围外试卷直接不可见
         # 查看学生是否已参加过此试卷
         existing = ExamRecord.query.filter_by(user_id=user_id, exam_id=p.id).first()
         items.append({
@@ -681,10 +713,16 @@ def list_available_exams():
 @jwt_required()
 def start_exam_from_paper(paper_id):
     """从指定试卷开始考试。"""
-    user_id = int(get_jwt_identity())
+    user = _current_user()
     paper = Exam.query.get(paper_id)
     if not paper or not paper.is_published:
         return jsonify({'error': '试卷不存在或未发布'}), 404
+
+    gate_err = _exam_subject_gate_err(user, paper)
+    if gate_err:
+        return gate_err
+
+    user_id = user.id
 
     # 阻止用户同时开多场进行中的考试
     in_progress = ExamRecord.query.filter_by(
