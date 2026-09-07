@@ -7,7 +7,7 @@
 """
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from sqlalchemy import desc, func
+from sqlalchemy import desc, func, case
 from functools import wraps
 
 from models import (
@@ -16,7 +16,7 @@ from models import (
     ExamRecord, ExamAnswer, StudyRecord, ErrorNote,
     User, UserRole, Subject, Chapter,
 )
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from access import allowed_subject_ids
 
@@ -38,6 +38,60 @@ def teacher_required(f):
             return jsonify({'error': 'Teacher or admin access required'}), 403
         return f(*args, **kwargs)
     return decorated
+
+
+# ============ 工具：考试时间窗 ============
+
+def _parse_iso_utc(value):
+    """ISO 字符串 → naive UTC datetime；空值返回 None。
+
+    前端统一用 toISOString() 提交（带 Z 或偏移）；库内统一 naive UTC。
+    """
+    if not value:
+        return None
+    dt = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+    if dt.tzinfo:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def _parse_paper_window(data):
+    """从请求体解析 {start_time, end_time}。两者要么都空要么都填且 start < end。
+
+    返回 (start_time, end_time, err)。
+    """
+    start_time = _parse_iso_utc(data.get('start_time'))
+    end_time = _parse_iso_utc(data.get('end_time'))
+    if start_time and not end_time:
+        return None, None, '结束时间不能为空'
+    if end_time and not start_time:
+        return None, None, '开始时间不能为空'
+    if start_time and end_time and start_time >= end_time:
+        return None, None, '开始时间必须早于结束时间'
+    return start_time, end_time, None
+
+
+def _paper_status(paper, now=None):
+    """试卷当前状态：not_started / available / ended。"""
+    now = now or datetime.utcnow()
+    if paper.start_time and now < paper.start_time:
+        return 'not_started'
+    if paper.end_time and now > paper.end_time:
+        return 'ended'
+    return 'available'
+
+
+def _record_deadline(record):
+    """进行中考试的截止时间：开始+时长 与 试卷结束时间 取早者。
+
+    exam_id 为空的旧记录没有试卷概念，退回旧逻辑。
+    """
+    deadline = record.started_at + timedelta(seconds=record.duration)
+    if record.exam_id:
+        paper = Exam.query.get(record.exam_id)
+        if paper and paper.end_time:
+            deadline = min(deadline, paper.end_time)
+    return deadline
 
 
 # ============ 工具：批改 ============
@@ -246,9 +300,12 @@ def _replace_type_distributions(rule, type_distribution):
 @jwt_required()
 @teacher_required
 def list_papers():
-    """获取当前教师创建的试卷列表。"""
+    """获取试卷列表：教师只看自己创建的，管理员看全部（可回顾他人试卷）。"""
     user = _current_user()
-    papers = Exam.query.filter_by(created_by=user.id).order_by(desc(Exam.created_at)).all()
+    if user.role == UserRole.ADMIN:
+        papers = Exam.query.order_by(desc(Exam.created_at)).all()
+    else:
+        papers = Exam.query.filter_by(created_by=user.id).order_by(desc(Exam.created_at)).all()
     return jsonify([{
         'id': p.id,
         'name': p.name,
@@ -259,6 +316,10 @@ def list_papers():
         'total_score': p.total_score,
         'total_questions': p.total_questions,
         'is_published': p.is_published,
+        'start_time': p.start_time.isoformat() + 'Z' if p.start_time else None,
+        'end_time': p.end_time.isoformat() + 'Z' if p.end_time else None,
+        'creator': p.creator.username if p.creator else '',
+        'is_owner': p.created_by == user.id,
         'rule_count': len(p.question_rules),
         'question_count': len(p.exam_questions),
         'created_at': p.created_at.isoformat() + 'Z',
@@ -333,6 +394,8 @@ def get_paper(paper_id):
         'total_score': paper.total_score,
         'total_questions': paper.total_questions,
         'is_published': paper.is_published,
+        'start_time': paper.start_time.isoformat() + 'Z' if paper.start_time else None,
+        'end_time': paper.end_time.isoformat() + 'Z' if paper.end_time else None,
         'rules': rules,
         'questions': questions,
         'created_at': paper.created_at.isoformat() + 'Z',
@@ -367,6 +430,16 @@ def update_paper(paper_id):
         paper.duration_minutes = int(data['duration_minutes'])
     if 'passing_score' in data:
         paper.passing_score = float(data['passing_score'])
+    if 'start_time' in data or 'end_time' in data:
+        # 考试时间窗：发布后也允许修改（教师纠错场景）；选题规则仍锁死。
+        # 必须成对提供（都为 null 表示清空，回到长期开放），避免误清窗口。
+        if 'start_time' not in data or 'end_time' not in data:
+            return jsonify({'error': '开始与结束时间需成对设置（都为空表示不限时）'}), 400
+        start_time, end_time, window_err = _parse_paper_window(data)
+        if window_err:
+            return jsonify({'error': window_err}), 400
+        paper.start_time = start_time
+        paper.end_time = end_time
 
     db.session.commit()
     return jsonify({'message': '更新成功'})
@@ -565,7 +638,7 @@ def generate_questions(paper_id):
 @jwt_required()
 @teacher_required
 def publish_paper(paper_id):
-    """发布试卷。"""
+    """发布试卷（可同时设置开始/结束考试时间；都不填则长期开放）。"""
     user = _current_user()
     paper = Exam.query.get(paper_id)
     if not paper or paper.created_by != user.id:
@@ -575,6 +648,13 @@ def publish_paper(paper_id):
     if not paper.exam_questions:
         return jsonify({'error': '请先生成题目再发布'}), 400
 
+    data = request.get_json() or {}
+    start_time, end_time, window_err = _parse_paper_window(data)
+    if window_err:
+        return jsonify({'error': window_err}), 400
+
+    paper.start_time = start_time
+    paper.end_time = end_time
     paper.is_published = True
     db.session.commit()
     return jsonify({'message': '发布成功'})
@@ -595,6 +675,140 @@ def unpublish_paper(paper_id):
     paper.is_published = False
     db.session.commit()
     return jsonify({'message': '取消发布成功'})
+
+
+# ============ 教师端：试卷回顾 ============
+
+@exam_bp.route('/papers/<int:paper_id>/review', methods=['GET'])
+@jwt_required()
+@teacher_required
+def review_paper(paper_id):
+    """试卷回顾：总体及格/优秀统计、章节正确率（薄弱章节）、逐题正确率。
+
+    教师只能回顾自己创建的试卷；管理员可回顾全部。
+    及格线 = 总分的 60%，优秀线 = 总分的 85%。
+    """
+    user = _current_user()
+    paper = Exam.query.get(paper_id)
+    if not paper or (user.role != UserRole.ADMIN and paper.created_by != user.id):
+        return jsonify({'error': '试卷不存在'}), 404
+
+    records = ExamRecord.query.filter_by(exam_id=paper_id) \
+        .filter(ExamRecord.submitted_at.isnot(None)).all()
+    rec_ids = [r.id for r in records]
+    participants = len(records)
+    in_progress = ExamRecord.query.filter_by(exam_id=paper_id, submitted_at=None).count()
+
+    pass_line = (paper.total_score or 0) * 0.6
+    excellent_line = (paper.total_score or 0) * 0.85
+    pass_count = sum(1 for r in records if r.obtained_score >= pass_line)
+    excellent_count = sum(1 for r in records if r.obtained_score >= excellent_line)
+    avg_obtained = round(
+        sum(r.obtained_score for r in records) / participants, 1
+    ) if participants else 0
+
+    overview = {
+        'participants': participants,
+        'in_progress': in_progress,
+        'avg_obtained': avg_obtained,
+        'pass_count': pass_count,
+        'pass_rate': round(pass_count / participants * 100, 1) if participants else 0,
+        'excellent_count': excellent_count,
+        'excellent_rate': round(excellent_count / participants * 100, 1) if participants else 0,
+        'total_score': paper.total_score,
+        'total_questions': paper.total_questions,
+    }
+
+    chapters = []
+    questions = []
+
+    # 卷内题目（含每题卷面分值与章节归属）
+    eqs = ExamQuestion.query.filter_by(exam_id=paper_id) \
+        .order_by(ExamQuestion.order_num.asc()).all()
+    qids = [eq.question_id for eq in eqs]
+    qmap = {q.id: q for q in Question.query.filter(Question.id.in_(qids)).all()} if qids else {}
+
+    if rec_ids:
+        # 逐题统计：每人每题一行占位（未作答 is_correct=False），答对数即正确人数
+        q_rows = db.session.query(
+            ExamAnswer.question_id,
+            func.count(ExamAnswer.id),
+            func.sum(case((ExamAnswer.is_correct, 1), else_=0)),
+        ).filter(ExamAnswer.exam_record_id.in_(rec_ids)) \
+         .group_by(ExamAnswer.question_id).all()
+        q_stats = {row[0]: (row[1], row[2] or 0) for row in q_rows}
+
+        for eq in eqs:
+            q = qmap.get(eq.question_id)
+            if not q:
+                continue
+            _answered, correct = q_stats.get(eq.question_id, (0, 0))
+            questions.append({
+                'question_id': eq.question_id,
+                'order_num': eq.order_num,
+                'title': q.title,
+                'question_type': q.question_type.value,
+                'score': eq.score,
+                'correct_count': correct,
+                'wrong_count': participants - correct,
+                'accuracy': round(correct / participants * 100, 1) if participants else 0,
+            })
+        # 正确率最差的题在前
+        questions.sort(key=lambda x: x['accuracy'])
+
+        # 章节统计：按 (学生, 题) 粒度聚合，正确率 = 正确作答数 / 总作答记录数
+        ch_rows = db.session.query(
+            Question.chapter_id,
+            func.count(ExamAnswer.id),
+            func.sum(case((ExamAnswer.is_correct, 1), else_=0)),
+        ).join(ExamAnswer, ExamAnswer.question_id == Question.id) \
+         .filter(ExamAnswer.exam_record_id.in_(rec_ids)) \
+         .group_by(Question.chapter_id).all()
+        ch_stats = {row[0]: (row[1], row[2] or 0) for row in ch_rows}
+        real_ids = [cid for cid in ch_stats if cid]
+        ch_names = {c.id: c.name for c in Chapter.query.filter(Chapter.id.in_(real_ids)).all()}
+
+        # 卷中每章的题数（按生成时冻结的题目列表统计）
+        ch_question_count = {}
+        for eq in eqs:
+            q = qmap.get(eq.question_id)
+            if q:
+                ch_question_count[q.chapter_id] = ch_question_count.get(q.chapter_id, 0) + 1
+
+        for chapter_id, qcount in ch_question_count.items():
+            answered, correct = ch_stats.get(chapter_id, (0, 0))
+            accuracy = round(correct / answered * 100, 1) if answered else 0
+            chapters.append({
+                'chapter_id': chapter_id,
+                'chapter_name': ch_names.get(chapter_id, '未分章') if chapter_id else '未分章',
+                'question_count': qcount,
+                'answered': answered,
+                'correct_people': correct,
+                'accuracy': accuracy,
+                'is_weak': accuracy < 60,
+            })
+        # 正确率最低的章节在前（薄弱章节）
+        chapters.sort(key=lambda c: c['accuracy'])
+
+    return jsonify({
+        'paper': {
+            'id': paper.id,
+            'name': paper.name,
+            'exam_type': paper.exam_type.value,
+            'duration_minutes': paper.duration_minutes,
+            'passing_score': paper.passing_score,
+            'total_score': paper.total_score,
+            'total_questions': paper.total_questions,
+            'is_published': paper.is_published,
+            'start_time': paper.start_time.isoformat() + 'Z' if paper.start_time else None,
+            'end_time': paper.end_time.isoformat() + 'Z' if paper.end_time else None,
+            'status': _paper_status(paper),
+            'creator': paper.creator.username if paper.creator else '',
+        },
+        'overview': overview,
+        'chapters': chapters,
+        'questions': questions,
+    })
 
 
 # ============ 辅助 API ============
@@ -679,10 +893,11 @@ def _exam_subject_gate_err(user, paper):
 @exam_bp.route('/available', methods=['GET'])
 @jwt_required()
 def list_available_exams():
-    """学生获取已发布的试卷列表。"""
+    """学生获取已发布的试卷列表（含考试时间窗状态）。"""
     user = _current_user()
     papers = Exam.query.filter_by(is_published=True).order_by(desc(Exam.created_at)).all()
     user_id = user.id
+    now = datetime.utcnow()
     items = []
     for p in papers:
         gate_err = _exam_subject_gate_err(user, p)
@@ -700,6 +915,9 @@ def list_available_exams():
             'total_score': p.total_score,
             'total_questions': p.total_questions,
             'is_published': p.is_published,
+            'start_time': p.start_time.isoformat() + 'Z' if p.start_time else None,
+            'end_time': p.end_time.isoformat() + 'Z' if p.end_time else None,
+            'status': _paper_status(p, now),
             'creator': p.creator.username if p.creator else '',
             'created_at': p.created_at.isoformat() + 'Z',
             'has_taken': existing is not None,
@@ -721,6 +939,13 @@ def start_exam_from_paper(paper_id):
     gate_err = _exam_subject_gate_err(user, paper)
     if gate_err:
         return gate_err
+
+    # 考试时间窗（严格窗口：未开始不能考、结束后不能开考）
+    now = datetime.utcnow()
+    if paper.start_time and now < paper.start_time:
+        return jsonify({'error': '考试尚未开始'}), 400
+    if paper.end_time and now > paper.end_time:
+        return jsonify({'error': '考试已结束，无法开始'}), 400
 
     user_id = user.id
 
@@ -771,7 +996,10 @@ def start_exam_from_paper(paper_id):
         ))
     db.session.commit()
 
+    # 截止时间 = 开始 + 时长 与 试卷结束时间 取早者
     deadline = record.started_at + timedelta(seconds=duration_sec)
+    if paper.end_time:
+        deadline = min(deadline, paper.end_time)
     question_list = []
     for eq in eqs:
         q = questions.get(eq.question_id)
@@ -810,7 +1038,7 @@ def get_exam(exam_id):
     ).all()}
 
     submitted = record.submitted_at is not None
-    deadline = record.started_at + timedelta(seconds=record.duration)
+    deadline = _record_deadline(record)
 
     # 获取试卷名称
     exam_name = ''
@@ -894,6 +1122,13 @@ def submit_exam(exam_id):
         Question.id.in_([r.question_id for r in rows])
     ).all()}
 
+    # 试卷中每题的分值（生成时冻结在 ExamQuestion 上）；
+    # 旧记录 exam_id 为空或题目已被换掉时回退 Question.score
+    eq_scores = {}
+    if record.exam_id:
+        eq_scores = {eq.question_id: eq.score
+                     for eq in ExamQuestion.query.filter_by(exam_id=record.exam_id).all()}
+
     obtained = 0.0
     correct_count = 0
     for r in rows:
@@ -910,8 +1145,7 @@ def submit_exam(exam_id):
         verdict = _is_answer_correct(q, r.user_answer)
         if verdict is True:
             r.is_correct = True
-            # 使用试卷中的分值（如果有的话），否则用题目默认分值
-            r.score = q.score or 0
+            r.score = eq_scores.get(r.question_id, q.score or 0)
             obtained += r.score
             correct_count += 1
         elif verdict is False:
@@ -1019,7 +1253,7 @@ def in_progress_exam():
         .order_by(desc(ExamRecord.started_at)).first()
     if not record:
         return jsonify({'in_progress': False})
-    deadline = record.started_at + timedelta(seconds=record.duration)
+    deadline = _record_deadline(record)
     # 获取试卷名称
     exam_name = ''
     if record.exam_id:

@@ -191,6 +191,11 @@ const remainingClass = computed(() => {
   return ''
 })
 
+function fmtDeadline(s) {
+  if (!s) return ''
+  return new Date(s).toLocaleString()
+}
+
 onBeforeRouteLeave(async (to, _from, next) => {
   if (!exam.value || exam.value.submitted) return next()
   try {
@@ -223,6 +228,9 @@ onBeforeUnmount(() => {
           <el-tag size="small">{{ exam.exam_type }}</el-tag>
           <el-tag size="small" type="info">共 {{ total }} 题</el-tag>
           <el-tag size="small" type="success">已答 {{ answeredCount }}</el-tag>
+          <el-tag v-if="exam.deadline" size="small" type="warning" effect="light">
+            截止 {{ fmtDeadline(exam.deadline) }}
+          </el-tag>
         </div>
         <div class="topbar-center" :class="['countdown', remainingClass]">
           <el-icon><Clock /></el-icon>

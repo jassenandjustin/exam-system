@@ -28,6 +28,17 @@ const EXAM_TYPE_MAP = {
   custom: { label: '自定义考试', color: '#909399' },
 }
 
+const STATUS_MAP = {
+  not_started: { label: '未开始', type: 'info', tip: '考试尚未开始' },
+  available: { label: '进行中', type: 'success', tip: '' },
+  ended: { label: '已结束', type: 'danger', tip: '考试已结束，无法参加' },
+}
+
+// 试卷状态：后端按时间窗给出 status；旧数据无 status 视为可参加
+function examStatus(exam) {
+  return exam.status || 'available'
+}
+
 async function loadAvailable() {
   try {
     const { data } = await api.get('/exam/available')
@@ -63,10 +74,16 @@ async function reloadAll() {
   loading.value = false
 }
 
-async function startExam(paperId) {
+async function startExam(paper) {
+  // 前端先按状态拦一道（后端也有严格校验）
+  const status = examStatus(paper)
+  if (status !== 'available') {
+    ElMessage.warning(STATUS_MAP[status].tip || '当前无法开始此考试')
+    return
+  }
   loading.value = true
   try {
-    const { data } = await api.post(`/exam/start/${paperId}`)
+    const { data } = await api.post(`/exam/start/${paper.id}`)
     ElMessage.success('已开考，祝你好运！')
     router.push(`/exam/run/${data.exam_id}`)
   } catch (err) {
@@ -162,8 +179,23 @@ onMounted(reloadAll)
               <span><el-icon><Document /></el-icon> {{ exam.total_questions }} 题</span>
               <span><el-icon><Trophy /></el-icon> {{ exam.total_score }} 分</span>
             </div>
+            <div class="exam-window">
+              <template v-if="exam.start_time">
+                <el-icon><Clock /></el-icon>
+                {{ fmtDate(exam.start_time) }} ~ {{ fmtDate(exam.end_time) }}
+              </template>
+              <template v-else>不限时</template>
+            </div>
             <div class="exam-creator">出题人: {{ exam.creator }}</div>
             <div class="exam-action">
+              <el-tag
+                :type="STATUS_MAP[examStatus(exam)].type"
+                size="small"
+                effect="light"
+                class="status-tag"
+              >
+                {{ STATUS_MAP[examStatus(exam)].label }}
+              </el-tag>
               <el-button
                 v-if="exam.has_taken"
                 type="info"
@@ -174,7 +206,8 @@ onMounted(reloadAll)
                 v-else
                 type="primary"
                 size="small"
-                @click="startExam(exam.id)"
+                :disabled="examStatus(exam) !== 'available'"
+                @click="startExam(exam)"
               >开始考试</el-button>
             </div>
           </el-card>
@@ -293,8 +326,24 @@ onMounted(reloadAll)
   color: var(--el-text-color-secondary);
   margin-bottom: 12px;
 }
+.exam-window {
+  font-size: 12px;
+  color: var(--el-text-color-regular);
+  margin-bottom: 4px;
+}
+.exam-window .el-icon {
+  vertical-align: -2px;
+  margin-right: 2px;
+}
 .exam-action {
   text-align: right;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.status-tag {
+  margin-right: auto;
 }
 .muted {
   color: var(--el-text-color-secondary);

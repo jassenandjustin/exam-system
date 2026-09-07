@@ -129,6 +129,8 @@ class Question(db.Model):
     correct_answer = db.Column(db.JSON, nullable=False)  # 正确答案
     explanation = db.Column(db.Text, nullable=True)  # 解析
     difficulty = db.Column(db.Enum(DifficultyLevel), default=DifficultyLevel.MEDIUM)
+    # 题目来源：real=真题 / mock=模拟题（默认）；用 String 避免枚举迁移兼容问题
+    question_source = db.Column(db.String(20), nullable=False, default='mock', server_default='mock')
     score = db.Column(db.Float, default=2.0)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -195,6 +197,9 @@ class Exam(db.Model):
     total_score = db.Column(db.Float, default=0.0)            # 总分
     total_questions = db.Column(db.Integer, default=0)         # 总题数
     is_published = db.Column(db.Boolean, default=False)        # 是否发布
+    # 考试开放窗口（naive UTC，与 started_at 约定一致）；NULL = 不限
+    start_time = db.Column(db.DateTime, nullable=True)
+    end_time = db.Column(db.DateTime, nullable=True)
     created_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

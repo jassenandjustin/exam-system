@@ -20,6 +20,7 @@ const query = reactive({
   chapter_id: null,
   question_type: '',
   difficulty: '',
+  question_source: '',
   search: ''
 })
 
@@ -34,6 +35,10 @@ const DIFFICULTIES = [
   { value: 'easy', label: '简单', tag: 'success' },
   { value: 'medium', label: '中等', tag: 'warning' },
   { value: 'hard', label: '困难', tag: 'danger' }
+]
+const QUESTION_SOURCES = [
+  { value: 'real', label: '真题', tag: 'danger' },
+  { value: 'mock', label: '模拟题', tag: 'info' }
 ]
 
 const typeMap = Object.fromEntries(QUESTION_TYPES.map(t => [t.value, t.label]))
@@ -66,6 +71,7 @@ async function loadQuestions() {
     if (query.chapter_id) params.chapter_id = query.chapter_id
     if (query.question_type) params.question_type = query.question_type
     if (query.difficulty) params.difficulty = query.difficulty
+    if (query.question_source) params.question_source = query.question_source
     if (query.search) params.search = query.search
     const { data } = await api.get('/questions', { params })
     questions.value = data.questions
@@ -91,7 +97,8 @@ function onPageChange(p) {
 }
 function resetFilter() {
   Object.assign(query, {
-    page: 1, subject_id: null, chapter_id: null, question_type: '', difficulty: '', search: ''
+    page: 1, subject_id: null, chapter_id: null,
+    question_type: '', difficulty: '', question_source: '', search: ''
   })
   loadQuestions()
 }
@@ -115,6 +122,7 @@ const blankForm = () => ({
   correct_bool: true,    // for true_false
   explanation: '',
   difficulty: 'medium',
+  question_source: 'mock',
   score: 2,
   tag_ids: []
 })
@@ -161,6 +169,7 @@ async function openEdit(row) {
     form.content = data.content || ''
     form.explanation = data.explanation || ''
     form.difficulty = data.difficulty
+    form.question_source = data.question_source || 'mock'
     form.score = data.score
     form.tag_ids = (data.tags || []).map(t => t.id)
 
@@ -212,6 +221,7 @@ function buildPayload() {
     content: form.content || null,
     explanation: form.explanation || null,
     difficulty: form.difficulty,
+    question_source: form.question_source,
     score: Number(form.score) || 0,
     tag_ids: form.tag_ids
   }
@@ -312,6 +322,14 @@ const importResult = ref(null)          // { imported_count, failed_count, error
 
 const VALID_TYPES = new Set(['single_choice', 'multiple_choice', 'true_false', 'fill_in_blank', 'subjective'])
 const VALID_DIFFS = new Set(['easy', 'medium', 'hard'])
+// 来源支持别名：真题/模拟题（中文）→ real/mock
+function normalizeSource(v) {
+  const s = String(v || '').trim().toLowerCase()
+  if (!s) return 'mock'
+  if (s === 'real' || s === '真题') return 'real'
+  if (s === 'mock' || s === '模拟题' || s === '模拟') return 'mock'
+  return null   // 非法值
+}
 
 function openImport() {
   importMode.value = 'json'
@@ -388,6 +406,10 @@ function normalizeImportItem(item, idx) {
   const difficulty = String(item.difficulty || 'medium').trim()
   if (!VALID_DIFFS.has(difficulty)) errors.push(`难度「${item.difficulty}」无效`)
 
+  // 来源（真题 / 模拟题，缺省 mock）
+  const question_source = normalizeSource(item.question_source ?? item.source)
+  if (!question_source) errors.push(`来源「${item.question_source ?? item.source}」无效（real/mock）`)
+
   // 选项
   let options = item.options
   if (typeof options === 'string') {
@@ -458,6 +480,7 @@ function normalizeImportItem(item, idx) {
     correct_answer,
     explanation: item.explanation ? String(item.explanation) : null,
     difficulty,
+    question_source,
     score: Number(item.score) || 2,
     tag_ids: tag_ids || []
   }
@@ -465,7 +488,7 @@ function normalizeImportItem(item, idx) {
 
 const CSV_HEADERS = [
   'subject', 'chapter', 'question_type', 'title', 'content',
-  'options', 'correct_answer', 'explanation', 'difficulty', 'score', 'tags'
+  'options', 'correct_answer', 'explanation', 'difficulty', 'score', 'tags', 'question_source'
 ]
 
 function buildItemsFromJson(text) {
@@ -605,7 +628,8 @@ function downloadTemplate(kind) {
       correct_answer: '2',
       explanation: '简单加法',
       difficulty: 'easy', score: 2,
-      tags: ['基础']
+      tags: ['基础'],
+      question_source: 'mock'
     },
     {
       subject: '数学', chapter: '第一章',
@@ -615,14 +639,16 @@ function downloadTemplate(kind) {
       correct_answer: ['2', '3'],
       explanation: '',
       difficulty: 'medium', score: 3,
-      tags: []
+      tags: [],
+      question_source: 'real'
     },
     {
       subject: '数学', chapter: '',
       question_type: 'true_false',
       title: '0 是自然数', content: '',
       options: '', correct_answer: true,
-      explanation: '', difficulty: 'easy', score: 1, tags: []
+      explanation: '', difficulty: 'easy', score: 1, tags: [],
+      question_source: 'mock'
     }
   ]
 
@@ -707,6 +733,15 @@ onMounted(async () => {
             >
               <el-option v-for="d in DIFFICULTIES" :key="d.value" :value="d.value" :label="d.label" />
             </el-select>
+            <el-select
+              v-model="query.question_source"
+              placeholder="来源"
+              clearable
+              style="width: 110px"
+              @change="onSearch"
+            >
+              <el-option v-for="s in QUESTION_SOURCES" :key="s.value" :value="s.value" :label="s.label" />
+            </el-select>
             <el-input
               v-model="query.search"
               placeholder="搜索题干"
@@ -740,6 +775,16 @@ onMounted(async () => {
           <template #default="{ row }">
             <el-tag :type="diffMap[row.difficulty]?.tag" effect="light">
               {{ diffMap[row.difficulty]?.label || row.difficulty }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="来源" width="90">
+          <template #default="{ row }">
+            <el-tag
+              :type="row.question_source === 'real' ? 'danger' : 'info'"
+              effect="light"
+            >
+              {{ row.question_source === 'real' ? '真题' : '模拟题' }}
             </el-tag>
           </template>
         </el-table-column>
@@ -826,6 +871,13 @@ onMounted(async () => {
             </el-form-item>
           </el-col>
         </el-row>
+
+        <el-form-item label="来源">
+          <el-radio-group v-model="form.question_source">
+            <el-radio value="mock">模拟题</el-radio>
+            <el-radio value="real">真题</el-radio>
+          </el-radio-group>
+        </el-form-item>
 
         <el-form-item label="题干" prop="title">
           <el-input v-model="form.title" type="textarea" :rows="2" placeholder="一句话题干" />

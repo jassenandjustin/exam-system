@@ -17,6 +17,7 @@ from sqlalchemy import case, func, desc
 from models import (
     db, StudyRecord, Question, Subject, Tag, QuestionTag,
     ErrorNote, ExamRecord, Favorite, DifficultyLevel,
+    User, UserRole, SchoolClass, ClassMember, class_subjects,
 )
 from datetime import datetime, timedelta
 
@@ -25,12 +26,31 @@ import numpy as np
 analysis_bp = Blueprint('analysis', __name__)
 
 
-def _check_self(user_id):
-    """只允许查询自己的数据。返回 (current_id, error_response_or_None)。"""
+def _check_view_access(user_id):
+    """查询某用户学习数据的访问控制。
+
+    本人 / 管理员（任意）/ 教师（其任教班级中的学生）可查；
+    其余一律 403（不用 401——前端拦截器会把 401 当登录态失效）。
+    返回 (current_id, error_response_or_None)，与旧 _check_self 签名一致。
+    """
     cur = int(get_jwt_identity())
-    if cur != user_id:
-        return cur, (jsonify({'error': 'Permission denied'}), 403)
-    return cur, None
+    me = User.query.get(cur)
+    if cur == user_id:
+        return cur, None
+    if me and me.role == UserRole.ADMIN:
+        return cur, None
+    if me and me.role == UserRole.TEACHER:
+        # 教师与学生同在至少一个班级 → 放行
+        hit = db.session.query(ClassMember.id).filter(
+            ClassMember.class_id.in_(
+                db.session.query(ClassMember.class_id)
+                .filter(ClassMember.user_id == cur)
+            ),
+            ClassMember.user_id == user_id,
+        ).first()
+        if hit:
+            return cur, None
+    return cur, (jsonify({'error': 'Permission denied'}), 403)
 
 
 def _correct_sum():
@@ -59,7 +79,7 @@ def _streak_days(user_id):
 @analysis_bp.route('/stats/<int:user_id>', methods=['GET'])
 @jwt_required()
 def get_learning_stats(user_id):
-    _, err = _check_self(user_id)
+    _, err = _check_view_access(user_id)
     if err:
         return err
 
@@ -121,7 +141,7 @@ def get_learning_stats(user_id):
 @analysis_bp.route('/trend/<int:user_id>', methods=['GET'])
 @jwt_required()
 def analyze_trend(user_id):
-    _, err = _check_self(user_id)
+    _, err = _check_view_access(user_id)
     if err:
         return err
 
@@ -183,7 +203,7 @@ def analyze_trend(user_id):
 @analysis_bp.route('/subject-analysis/<int:user_id>', methods=['GET'])
 @jwt_required()
 def subject_analysis(user_id):
-    _, err = _check_self(user_id)
+    _, err = _check_view_access(user_id)
     if err:
         return err
 
@@ -218,7 +238,7 @@ def subject_analysis(user_id):
 @analysis_bp.route('/weak-points/<int:user_id>', methods=['GET'])
 @jwt_required()
 def weak_points(user_id):
-    _, err = _check_self(user_id)
+    _, err = _check_view_access(user_id)
     if err:
         return err
 
@@ -274,7 +294,7 @@ def weak_points(user_id):
 @analysis_bp.route('/type-distribution/<int:user_id>', methods=['GET'])
 @jwt_required()
 def type_distribution(user_id):
-    _, err = _check_self(user_id)
+    _, err = _check_view_access(user_id)
     if err:
         return err
 
@@ -304,7 +324,7 @@ def type_distribution(user_id):
 @analysis_bp.route('/report/<int:user_id>', methods=['GET'])
 @jwt_required()
 def generate_report(user_id):
-    _, err = _check_self(user_id)
+    _, err = _check_view_access(user_id)
     if err:
         return err
 
@@ -393,7 +413,7 @@ def generate_report(user_id):
 @analysis_bp.route('/recommend/<int:user_id>', methods=['GET'])
 @jwt_required()
 def recommend_questions(user_id):
-    _, err = _check_self(user_id)
+    _, err = _check_view_access(user_id)
     if err:
         return err
 
@@ -439,3 +459,220 @@ def recommend_questions(user_id):
         'difficulty': q.difficulty.value,
         'recommend_reason': reason,
     } for q in recommended]})
+
+
+# ============ 教师/管理员：班级与学科总体分析 ============
+
+def _require_teacher_or_admin():
+    """教师或管理员才可访问；返回 (user, error)。"""
+    user = User.query.get(int(get_jwt_identity()))
+    if not user or user.role not in (UserRole.TEACHER, UserRole.ADMIN):
+        return None, (jsonify({'error': 'Permission denied'}), 403)
+    return user, None
+
+
+def _visible_class_ids(user):
+    """可见班级：admin → None（全部）；teacher → 其任教班级 id 集合。"""
+    if user.role == UserRole.ADMIN:
+        return None
+    return {r[0] for r in db.session.query(ClassMember.class_id)
+            .filter(ClassMember.user_id == user.id).all()}
+
+
+def _check_class_access(user, class_id):
+    """校验 class_id 在用户可见范围内；返回 error 或 None。"""
+    visible = _visible_class_ids(user)
+    if visible is None:
+        return None
+    if class_id not in visible:
+        return jsonify({'error': '该班级不在你的任教范围内'}), 403
+    return None
+
+
+def _class_student_ids(class_id):
+    """班级学生 user_id 子查询（仅 STUDENT 角色）。"""
+    return db.session.query(ClassMember.user_id) \
+        .join(User, User.id == ClassMember.user_id) \
+        .filter(ClassMember.class_id == class_id, User.role == UserRole.STUDENT) \
+        .subquery()
+
+
+@analysis_bp.route('/teacher/classes', methods=['GET'])
+@jwt_required()
+def teacher_class_overview():
+    """教师任教班级（admin 为全部班级）的总体学习情况。"""
+    user, err = _require_teacher_or_admin()
+    if err:
+        return err
+
+    days = request.args.get('days', 30, type=int)
+    start_date = datetime.utcnow() - timedelta(days=days)
+
+    visible = _visible_class_ids(user)
+    classes = SchoolClass.query.order_by(SchoolClass.id.asc()).all()
+    if visible is not None:
+        classes = [c for c in classes if c.id in visible]
+
+    items = []
+    for c in classes:
+        students_sq = _class_student_ids(c.id)
+        student_count = db.session.query(func.count()).select_from(students_sq).scalar() or 0
+
+        agg = db.session.query(
+            func.count(StudyRecord.id),
+            func.sum(case((StudyRecord.is_correct, 1), else_=0)),
+            func.avg(StudyRecord.used_time),
+        ).filter(StudyRecord.user_id.in_(students_sq)).one()
+        total, correct, avg_time = agg
+
+        period_total = db.session.query(func.count(StudyRecord.id)).filter(
+            StudyRecord.user_id.in_(students_sq),
+            StudyRecord.practiced_at >= start_date,
+        ).scalar() or 0
+        active_students = db.session.query(func.count(func.distinct(StudyRecord.user_id))).filter(
+            StudyRecord.user_id.in_(students_sq),
+            StudyRecord.practiced_at >= start_date,
+        ).scalar() or 0
+
+        items.append({
+            'id': c.id,
+            'name': c.name,
+            'description': c.description,
+            'student_count': student_count,
+            'total_practice': int(total or 0),
+            'correct_count': int(correct or 0),
+            'accuracy': round((correct or 0) / total * 100, 1) if total else 0,
+            'avg_time_seconds': round(avg_time or 0, 1),
+            'period_practice': period_total,
+            'active_students': active_students,
+        })
+
+    return jsonify({'classes': items})
+
+
+@analysis_bp.route('/teacher/classes/<int:class_id>/subjects', methods=['GET'])
+@jwt_required()
+def teacher_class_subjects(class_id):
+    """班级维度的学科练习量与正确率（与个人 subject-analysis 同构）。"""
+    user, err = _require_teacher_or_admin()
+    if err:
+        return err
+    class_err = _check_class_access(user, class_id)
+    if class_err:
+        return class_err
+
+    days = request.args.get('days', 30, type=int)
+    start_date = datetime.utcnow() - timedelta(days=days)
+
+    students_sq = _class_student_ids(class_id)
+    rows = db.session.query(
+        Subject.id,
+        Subject.name,
+        func.count(StudyRecord.id).label('total'),
+        _correct_sum().label('correct'),
+        func.avg(StudyRecord.used_time).label('avg_time'),
+    ).join(Question, StudyRecord.question_id == Question.id) \
+     .join(Subject, Question.subject_id == Subject.id) \
+     .filter(StudyRecord.user_id.in_(students_sq)) \
+     .group_by(Subject.id).all()
+
+    subjects = []
+    for r in rows:
+        acc = (r.correct / r.total * 100) if r.total else 0
+        subjects.append({
+            'subject_id': r.id,
+            'subject_name': r.name,
+            'total_practice': int(r.total or 0),
+            'correct_count': int(r.correct or 0),
+            'accuracy': round(acc, 1),
+            'avg_time': round(r.avg_time or 0, 1),
+        })
+    subjects.sort(key=lambda s: s['total_practice'], reverse=True)
+
+    # 周期内练习量（卡片展示用）
+    period_total = db.session.query(func.count(StudyRecord.id)).filter(
+        StudyRecord.user_id.in_(students_sq),
+        StudyRecord.practiced_at >= start_date,
+    ).scalar() or 0
+
+    return jsonify({'subjects': subjects, 'period_practice': period_total, 'days': days})
+
+
+@analysis_bp.route('/teacher/classes/<int:class_id>/students', methods=['GET'])
+@jwt_required()
+def teacher_class_students(class_id):
+    """班内学生列表 + 每人练习概况（供钻取到个人分析）。"""
+    user, err = _require_teacher_or_admin()
+    if err:
+        return err
+    class_err = _check_class_access(user, class_id)
+    if class_err:
+        return class_err
+
+    students = db.session.query(User).join(ClassMember, ClassMember.user_id == User.id) \
+        .filter(ClassMember.class_id == class_id, User.role == UserRole.STUDENT) \
+        .order_by(User.id.asc()).all()
+
+    items = []
+    for s in students:
+        agg = db.session.query(
+            func.count(StudyRecord.id),
+            func.sum(case((StudyRecord.is_correct, 1), else_=0)),
+            func.avg(StudyRecord.used_time),
+        ).filter(StudyRecord.user_id == s.id).one()
+        total, correct, avg_time = agg
+        items.append({
+            'user_id': s.id,
+            'username': s.username,
+            'email': s.email,
+            'total_practice': int(total or 0),
+            'correct_count': int(correct or 0),
+            'accuracy': round((correct or 0) / total * 100, 1) if total else 0,
+            'avg_time_seconds': round(avg_time or 0, 1),
+        })
+
+    return jsonify({'students': items})
+
+
+@analysis_bp.route('/teacher/classes/<int:class_id>/trend', methods=['GET'])
+@jwt_required()
+def teacher_class_trend(class_id):
+    """班级每日练习量与正确率（个人 trend 的多用户版）。"""
+    user, err = _require_teacher_or_admin()
+    if err:
+        return err
+    class_err = _check_class_access(user, class_id)
+    if class_err:
+        return class_err
+
+    days = request.args.get('days', 30, type=int)
+    start_date = datetime.utcnow() - timedelta(days=days - 1)
+    start_date = datetime(start_date.year, start_date.month, start_date.day)
+
+    students_sq = _class_student_ids(class_id)
+    daily = db.session.query(
+        func.date(StudyRecord.practiced_at).label('date'),
+        func.count(StudyRecord.id).label('total'),
+        _correct_sum().label('correct'),
+    ).filter(
+        StudyRecord.user_id.in_(students_sq),
+        StudyRecord.practiced_at >= start_date,
+    ).group_by(func.date(StudyRecord.practiced_at)).order_by('date').all()
+
+    by_date = {row.date: row for row in daily}
+
+    dates, practice_counts, accuracies = [], [], []
+    cur = start_date.date()
+    end = datetime.utcnow().date()
+    while cur <= end:
+        dates.append(cur.strftime('%Y-%m-%d'))
+        row = by_date.get(cur)
+        if row and row.total:
+            practice_counts.append(int(row.total))
+            accuracies.append(round((row.correct or 0) / row.total * 100, 1))
+        else:
+            practice_counts.append(0)
+            accuracies.append(0)
+        cur += timedelta(days=1)
+
+    return jsonify({'trend': {'dates': dates, 'practice_counts': practice_counts, 'accuracies': accuracies}})

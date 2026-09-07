@@ -97,6 +97,12 @@ const routes = [
     meta: { requiresAuth: true, requiresTeacher: true }
   },
   {
+    path: '/exam/paper/:id/review',
+    name: 'ExamPaperReview',
+    component: () => import('@/views/exam/ExamReview.vue'),
+    meta: { requiresAuth: true, requiresTeacher: true }
+  },
+  {
     path: '/analysis',
     name: 'Analysis',
     component: () => import('@/views/Analysis.vue'),

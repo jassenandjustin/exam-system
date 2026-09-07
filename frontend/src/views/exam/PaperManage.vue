@@ -7,6 +7,7 @@ import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '@/api'
 import RuleForm from './RuleForm.vue'
+import PublishDialog from './PublishDialog.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -15,6 +16,8 @@ const paperId = computed(() => route.params.id)
 const paper = ref(null)
 const loading = ref(false)
 const showRuleForm = ref(false)
+const publishDialogVisible = ref(false)
+const publishDialogMode = ref('publish')   // 'publish' | 'window'
 
 const EXAM_TYPE_MAP = {
   quick: '快速练习',
@@ -102,18 +105,41 @@ async function generateQuestions() {
 
 async function togglePublish() {
   if (!paper.value) return
-  try {
-    if (paper.value.is_published) {
+  if (paper.value.is_published) {
+    // 取消发布影响已开考的学生，需要二次确认
+    try {
+      await ElMessageBox.confirm(
+        '取消发布后学生将无法开始此考试（已交卷的成绩保留），确定取消发布？',
+        '取消发布',
+        { type: 'warning', confirmButtonText: '确定取消发布', cancelButtonText: '再想想' }
+      )
+    } catch { return }
+    try {
       await api.post(`/exam/papers/${paperId.value}/unpublish`)
       ElMessage.success('已取消发布')
-    } else {
-      await api.post(`/exam/papers/${paperId.value}/publish`)
-      ElMessage.success('发布成功，学生现在可以参加此考试')
+    } catch (err) {
+      ElMessage.error(err.response?.data?.error || '操作失败')
     }
     loadPaper()
-  } catch (err) {
-    ElMessage.error(err.response?.data?.error || '操作失败')
+  } else {
+    // 发布走对话框（可选开始/结束考试时间）
+    publishDialogMode.value = 'publish'
+    publishDialogVisible.value = true
   }
+}
+
+function openWindowEdit() {
+  publishDialogMode.value = 'window'
+  publishDialogVisible.value = true
+}
+
+function goReview() {
+  router.push(`/exam/paper/${paperId.value}/review`)
+}
+
+function fmtDate(s) {
+  if (!s) return '—'
+  return new Date(s).toLocaleString()
 }
 
 function editBasicInfo() {
@@ -155,7 +181,27 @@ onMounted(loadPaper)
             <el-tag v-else type="info" size="small">未发布</el-tag>
           </el-descriptions-item>
           <el-descriptions-item label="描述">{{ paper.description || '—' }}</el-descriptions-item>
+          <el-descriptions-item label="考试时间">
+            <span v-if="paper.start_time">
+              {{ fmtDate(paper.start_time) }} ~ {{ fmtDate(paper.end_time) }}
+            </span>
+            <span v-else class="muted">不限时</span>
+          </el-descriptions-item>
         </el-descriptions>
+
+        <div class="info-actions">
+          <el-button
+            v-if="paper.is_published"
+            size="small"
+            @click="openWindowEdit"
+          >调整考试时间</el-button>
+          <el-button
+            v-if="paper.questions?.length"
+            size="small"
+            type="primary"
+            @click="goReview"
+          >试卷回顾</el-button>
+        </div>
       </el-card>
 
       <!-- 选题规则 -->
@@ -289,6 +335,16 @@ onMounted(loadPaper)
         </el-button>
       </div>
     </template>
+
+    <!-- 发布 / 调整时间对话框 -->
+    <PublishDialog
+      v-model="publishDialogVisible"
+      :paper-id="Number(paperId)"
+      :mode="publishDialogMode"
+      :initial-start="paper?.start_time"
+      :initial-end="paper?.end_time"
+      @done="loadPaper"
+    />
   </div>
 </template>
 
@@ -310,6 +366,14 @@ onMounted(loadPaper)
   display: flex;
   justify-content: space-between;
   align-items: center;
+}
+.info-actions {
+  margin-top: 12px;
+  display: flex;
+  gap: 8px;
+}
+.muted {
+  color: var(--el-text-color-secondary);
 }
 .warn-text {
   color: var(--el-color-danger);

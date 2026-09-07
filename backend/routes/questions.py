@@ -11,6 +11,16 @@ import json
 
 question_bp = Blueprint('questions', __name__)
 
+QUESTION_SOURCES = ('real', 'mock')  # real=真题 / mock=模拟题
+
+
+def _validated_question_source(value):
+    """校验题目来源，返回 (value, err)；缺省 mock。"""
+    source = value or 'mock'
+    if source not in QUESTION_SOURCES:
+        return None, '题目来源无效（real=真题 / mock=模拟题）'
+    return source, None
+
 #
 @question_bp.route('', methods=['GET'])
 @jwt_required(optional=True)
@@ -20,6 +30,7 @@ def get_questions():
     chapter_id = request.args.get('chapter_id', type=int)
     question_type = request.args.get('question_type')
     difficulty = request.args.get('difficulty')
+    question_source = request.args.get('question_source')
     tag_ids = request.args.getlist('tag_ids', type=int)
     page = request.args.get('page', 1, type=int)
     per_page = request.args.get('per_page', 10, type=int)
@@ -36,6 +47,8 @@ def get_questions():
         query = query.filter_by(question_type=QuestionType(question_type))
     if difficulty:
         query = query.filter_by(difficulty=DifficultyLevel(difficulty))
+    if question_source in QUESTION_SOURCES:
+        query = query.filter_by(question_source=question_source)
     if search:
         query = query.filter(Question.title.contains(search) | Question.content.contains(search))
 
@@ -62,6 +75,7 @@ def get_questions():
             'content': q.content,
             'options': q.options,
             'difficulty': q.difficulty.value,
+            'question_source': q.question_source or 'mock',
             'score': q.score,
             'explanation': q.explanation,
             'tags': [{'id': t.id, 'name': t.name, 'category': t.category} for t in tags],
@@ -97,6 +111,7 @@ def get_question(question_id):
         'options': question.options,
         'correct_answer': question.correct_answer,
         'difficulty': question.difficulty.value,
+        'question_source': question.question_source or 'mock',
         'score': question.score,
         'explanation': question.explanation,
         'tags': [{'id': t.id, 'name': t.name, 'category': t.category} for t in tags],
@@ -123,6 +138,10 @@ def create_question():
         if not data.get(field):
             return jsonify({'error': f'{field} is required'}), 400
 
+    source, source_err = _validated_question_source(data.get('question_source'))
+    if source_err:
+        return jsonify({'error': source_err}), 400
+
     #
     try:
         question = Question(
@@ -135,6 +154,7 @@ def create_question():
             correct_answer=data['correct_answer'],
             explanation=data.get('explanation'),
             difficulty=DifficultyLevel(data.get('difficulty', 'medium')),
+            question_source=source,
             score=data.get('score', 2.0),
             created_by=user_id
         )
@@ -196,6 +216,11 @@ def update_question(question_id):
             question.explanation = data['explanation']
         if data.get('difficulty'):
             question.difficulty = DifficultyLevel(data['difficulty'])
+        if data.get('question_source'):
+            source, source_err = _validated_question_source(data['question_source'])
+            if source_err:
+                return jsonify({'error': source_err}), 400
+            question.question_source = source
         if data.get('score'):
             question.score = data['score']
 
@@ -281,6 +306,11 @@ def batch_import_questions():
             if q_data.get('correct_answer') is None:
                 raise ValueError('Field correct_answer is required')
 
+            source, source_err = _validated_question_source(
+                q_data.get('question_source', q_data.get('source')))
+            if source_err:
+                raise ValueError(source_err)
+
             # 用 savepoint 让单行失败不影响整个批次
             with db.session.begin_nested():
                 question = Question(
@@ -293,6 +323,7 @@ def batch_import_questions():
                     correct_answer=q_data['correct_answer'],
                     explanation=q_data.get('explanation'),
                     difficulty=DifficultyLevel(q_data.get('difficulty', 'medium')),
+                    question_source=source,
                     score=q_data.get('score', 2.0),
                     created_by=user_id
                 )

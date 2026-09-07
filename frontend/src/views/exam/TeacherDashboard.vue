@@ -8,10 +8,30 @@ import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '@/api'
+import PublishDialog from './PublishDialog.vue'
 
 const router = useRouter()
 const papers = ref([])
 const loading = ref(false)
+
+// 发布对话框状态
+const publishVisible = ref(false)
+const publishPaperId = ref(null)
+
+const STATUS_MAP = {
+  not_started: { label: '未开始', type: 'info' },
+  available: { label: '进行中', type: 'success' },
+  ended: { label: '已结束', type: 'danger' },
+}
+
+// 试卷当前状态（未发布 → 未发布；已发布按时间窗判断）
+function paperStatus(p) {
+  if (!p.is_published) return null
+  const now = Date.now()
+  if (p.start_time && now < new Date(p.start_time).getTime()) return 'not_started'
+  if (p.end_time && now > new Date(p.end_time).getTime()) return 'ended'
+  return 'available'
+}
 
 const EXAM_TYPE_MAP = {
   quick: { label: '快速练习', color: '#67c23a' },
@@ -60,16 +80,29 @@ async function deletePaper(id) {
 async function togglePublish(paper) {
   try {
     if (paper.is_published) {
+      try {
+        await ElMessageBox.confirm(
+          '取消发布后学生将无法开始此考试（已交卷的成绩保留），确定取消发布？',
+          '取消发布',
+          { type: 'warning', confirmButtonText: '确定取消发布', cancelButtonText: '再想想' }
+        )
+      } catch { return }
       await api.post(`/exam/papers/${paper.id}/unpublish`)
       ElMessage.success('已取消发布')
     } else {
-      await api.post(`/exam/papers/${paper.id}/publish`)
-      ElMessage.success('发布成功，学生现在可以参加此考试')
+      // 发布走对话框（可选开始/结束考试时间）
+      publishPaperId.value = paper.id
+      publishVisible.value = true
+      return
     }
     loadPapers()
   } catch (err) {
     ElMessage.error(err.response?.data?.error || '操作失败')
   }
+}
+
+function reviewPaper(id) {
+  router.push(`/exam/paper/${id}/review`)
 }
 
 function fmtDate(s) {
@@ -112,28 +145,56 @@ onMounted(loadPapers)
           <div class="card-status">
             <el-tag v-if="p.is_published" type="success" size="small">已发布</el-tag>
             <el-tag v-else type="info" size="small">未发布</el-tag>
+            <el-tag
+              v-if="paperStatus(p)"
+              :type="STATUS_MAP[paperStatus(p)].type"
+              size="small"
+              effect="light"
+            >
+              {{ STATUS_MAP[paperStatus(p)].label }}
+            </el-tag>
             <span class="rule-count">{{ p.rule_count }} 条规则</span>
           </div>
+          <div v-if="p.is_published && p.start_time" class="card-window">
+            {{ fmtDate(p.start_time) }} ~ {{ fmtDate(p.end_time) }}
+          </div>
+          <div v-else-if="p.is_published" class="card-window muted">不限时</div>
+          <div v-if="p.creator" class="card-creator">出题人：{{ p.creator }}</div>
           <div class="card-actions">
-            <el-button size="small" @click="editPaper(p.id)">编辑</el-button>
-            <el-button size="small" type="primary" @click="managePaper(p.id)">管理题目</el-button>
+            <template v-if="p.is_owner !== false">
+              <el-button size="small" @click="editPaper(p.id)">编辑</el-button>
+              <el-button size="small" type="primary" @click="managePaper(p.id)">管理题目</el-button>
+              <el-button
+                size="small"
+                :type="p.is_published ? 'warning' : 'success'"
+                @click="togglePublish(p)"
+              >
+                {{ p.is_published ? '取消发布' : '发布' }}
+              </el-button>
+              <el-button
+                v-if="!p.is_published"
+                size="small"
+                type="danger"
+                @click="deletePaper(p.id)"
+              >删除</el-button>
+            </template>
             <el-button
               size="small"
-              :type="p.is_published ? 'warning' : 'success'"
-              @click="togglePublish(p)"
-            >
-              {{ p.is_published ? '取消发布' : '发布' }}
-            </el-button>
-            <el-button
-              v-if="!p.is_published"
-              size="small"
-              type="danger"
-              @click="deletePaper(p.id)"
-            >删除</el-button>
+              type="primary"
+              effect="plain"
+              @click="reviewPaper(p.id)"
+            >试卷回顾</el-button>
           </div>
         </el-card>
       </el-col>
     </el-row>
+
+    <!-- 发布对话框（可选开始/结束考试时间） -->
+    <PublishDialog
+      v-model="publishVisible"
+      :paper-id="publishPaperId"
+      @done="loadPapers"
+    />
   </div>
 </template>
 
@@ -193,6 +254,19 @@ onMounted(loadPapers)
 .rule-count {
   font-size: 12px;
   color: var(--el-text-color-secondary);
+}
+.card-window {
+  font-size: 12px;
+  color: var(--el-text-color-regular);
+  margin-bottom: 8px;
+}
+.card-window.muted {
+  color: var(--el-text-color-secondary);
+}
+.card-creator {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  margin-bottom: 8px;
 }
 .card-actions {
   display: flex;

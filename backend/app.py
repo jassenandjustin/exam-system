@@ -65,6 +65,15 @@ def _seed_default_admin():
         print(f'WARNING: default admin seeding failed (app continues to start): {e}')
 
 
+def _add_column_if_missing(table, column, ddl):
+    """缺列则 ALTER TABLE ADD COLUMN（方言无关，SQLite/MySQL 通吃）。幂等。"""
+    cols = [c['name'] for c in db.inspect(db.engine).get_columns(table)]
+    if column not in cols:
+        db.session.execute(db.text(f'ALTER TABLE {table} ADD COLUMN {ddl}'))
+        db.session.commit()
+        print(f'Migrated: {table}.{column} added')
+
+
 def _ensure_schema_migrations():
     """create_all 只建缺失表、不会给已存在的表加新列；此处做轻量列迁移。
 
@@ -72,14 +81,14 @@ def _ensure_schema_migrations():
     检查列是否存在，缺则 ALTER TABLE ADD COLUMN（带 DEFAULT，存量行立即生效）。
     """
     try:
-        inspector = db.inspect(db.engine)
-        cols = [c['name'] for c in inspector.get_columns('users')]
-        if 'status' not in cols:
-            db.session.execute(db.text(
-                "ALTER TABLE users ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'approved'"
-            ))
-            db.session.commit()
-            print("Migrated: users.status added (existing users default to 'approved')")
+        _add_column_if_missing(
+            'users', 'status',
+            "status VARCHAR(20) NOT NULL DEFAULT 'approved'")
+        _add_column_if_missing(
+            'questions', 'question_source',
+            "question_source VARCHAR(20) NOT NULL DEFAULT 'mock'")
+        _add_column_if_missing('exams', 'start_time', "start_time DATETIME NULL")
+        _add_column_if_missing('exams', 'end_time', "end_time DATETIME NULL")
     except Exception as e:
         db.session.rollback()
         print(f'WARNING: schema migration failed: {e}')
