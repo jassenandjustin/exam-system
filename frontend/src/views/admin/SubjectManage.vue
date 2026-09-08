@@ -6,6 +6,7 @@ import api from '@/api'
 // ===== 状态 =====
 const subjects = ref([])
 const chapters = ref([])
+const sections = ref([])
 const tags = ref([])
 const subjectsLoading = ref(false)
 const chaptersLoading = ref(false)
@@ -23,13 +24,15 @@ async function loadAll() {
   chaptersLoading.value = true
   tagsLoading.value = true
   try {
-    const [s, c, t] = await Promise.all([
+    const [s, c, sec, t] = await Promise.all([
       api.get('/taxonomy/subjects'),
       api.get('/taxonomy/chapters'),
+      api.get('/taxonomy/sections'),
       api.get('/taxonomy/tags')
     ])
     subjects.value = s.data
     chapters.value = c.data
+    sections.value = sec.data
     tags.value = t.data
   } catch (err) {
     ElMessage.error('加载失败')
@@ -85,7 +88,7 @@ async function deleteSubject(row) {
   }
 }
 
-// ===== 章节 =====
+// ===== 章 =====
 const chapterDlg = reactive({
   visible: false, mode: 'create',
   form: { id: null, subject_id: null, name: '', description: '', order_num: 0 }
@@ -116,7 +119,7 @@ function openEditChapter(row) {
 }
 async function submitChapter() {
   if (!chapterDlg.form.name.trim() || !chapterDlg.form.subject_id) {
-    ElMessage.error('请填写学科与章节名')
+    ElMessage.error('请填写学科与章名')
     return
   }
   try {
@@ -139,7 +142,7 @@ async function submitChapter() {
 }
 async function deleteChapter(row) {
   try {
-    await ElMessageBox.confirm(`删除章节「${row.name}」？包含题目时无法删除。`, '删除章节', {
+    await ElMessageBox.confirm(`删除章「${row.name}」？包含题目或节时无法删除。`, '删除章', {
       type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消'
     })
   } catch { return }
@@ -153,6 +156,76 @@ async function deleteChapter(row) {
 }
 function subjectName(id) {
   return subjects.value.find(s => s.id === id)?.name || '—'
+}
+function sectionsOf(chapterId) {
+  return sections.value.filter(s => s.chapter_id === chapterId)
+}
+
+// ===== 节 =====
+const sectionDlg = reactive({
+  visible: false, mode: 'create',
+  form: { id: null, chapter_id: null, name: '', description: '', order_num: 0 }
+})
+function chapterName(id) {
+  return chapters.value.find(c => c.id === id)?.name || '—'
+}
+function openCreateSection(chapterId) {
+  sectionDlg.mode = 'create'
+  sectionDlg.form = { id: null, chapter_id: chapterId, name: '', description: '', order_num: 0 }
+  sectionDlg.visible = true
+}
+function openEditSection(row) {
+  sectionDlg.mode = 'edit'
+  sectionDlg.form = {
+    id: row.id,
+    chapter_id: row.chapter_id,
+    name: row.name,
+    description: row.description || '',
+    order_num: row.order_num || 0
+  }
+  sectionDlg.visible = true
+}
+async function submitSection() {
+  if (!sectionDlg.form.name.trim()) {
+    ElMessage.error('请填写节名称')
+    return
+  }
+  try {
+    if (sectionDlg.mode === 'create') {
+      await api.post('/taxonomy/sections', {
+        chapter_id: sectionDlg.form.chapter_id,
+        name: sectionDlg.form.name,
+        description: sectionDlg.form.description,
+        order_num: sectionDlg.form.order_num
+      })
+    } else {
+      // 后端不支持改 chapter_id，仅更新其它字段
+      await api.put(`/taxonomy/sections/${sectionDlg.form.id}`, {
+        name: sectionDlg.form.name,
+        description: sectionDlg.form.description,
+        order_num: sectionDlg.form.order_num
+      })
+    }
+    ElMessage.success('已保存')
+    sectionDlg.visible = false
+    loadAll()
+  } catch (err) {
+    ElMessage.error(err.response?.data?.error || '保存失败')
+  }
+}
+async function deleteSection(row) {
+  try {
+    await ElMessageBox.confirm(`删除节「${row.name}」？包含题目时无法删除。`, '删除节', {
+      type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消'
+    })
+  } catch { return }
+  try {
+    await api.delete(`/taxonomy/sections/${row.id}`)
+    ElMessage.success('已删除')
+    loadAll()
+  } catch (err) {
+    ElMessage.error(err.response?.data?.error || '删除失败')
+  }
 }
 
 // ===== 标签 =====
@@ -226,7 +299,7 @@ onMounted(loadAll)
           <el-table v-loading="subjectsLoading" :data="subjects" stripe @row-click="(row) => selectedSubjectId = row.id" highlight-current-row>
             <el-table-column prop="id" label="ID" width="60" />
             <el-table-column prop="name" label="名称" min-width="120" />
-            <el-table-column prop="chapter_count" label="章节" width="70" align="center" />
+            <el-table-column prop="chapter_count" label="章" width="70" align="center" />
             <el-table-column prop="question_count" label="题目" width="70" align="center" />
             <el-table-column label="操作" width="140">
               <template #default="{ row }">
@@ -238,26 +311,64 @@ onMounted(loadAll)
         </el-card>
       </el-col>
 
-      <!-- 章节 -->
+      <!-- 章（展开行显示节） -->
       <el-col :xs="24" :md="14">
         <el-card>
           <template #header>
             <div class="card-header">
               <span>
-                章节
+                章
                 <el-tag v-if="selectedSubjectId" size="small" style="margin-left:8px">{{ subjectName(selectedSubjectId) }}</el-tag>
                 <el-button v-if="selectedSubjectId" size="small" link @click="selectedSubjectId = null">清除筛选</el-button>
               </span>
-              <el-button size="small" type="primary" @click="openCreateChapter">新增章节</el-button>
+              <el-button size="small" type="primary" @click="openCreateChapter">新增章</el-button>
             </div>
           </template>
-          <el-table v-loading="chaptersLoading" :data="filteredChapters" stripe>
+          <el-table
+            v-loading="chaptersLoading"
+            :data="filteredChapters"
+            stripe
+            row-key="id"
+          >
+            <el-table-column type="expand">
+              <template #default="{ row }">
+                <div class="section-expand">
+                  <div class="section-expand-header">
+                    <span>节（{{ sectionsOf(row.id).length }}）</span>
+                    <el-button size="small" type="primary" @click="openCreateSection(row.id)">新增节</el-button>
+                  </div>
+                  <el-table
+                    :data="sectionsOf(row.id)"
+                    size="small"
+                    :show-header="sectionsOf(row.id).length > 0"
+                  >
+                    <el-table-column prop="order_num" label="序号" width="80" align="center" />
+                    <el-table-column prop="name" label="名称" min-width="120" />
+                    <el-table-column prop="question_count" label="题目数" width="90" align="center" />
+                    <el-table-column label="操作" width="140">
+                      <template #default="scope">
+                        <el-button size="small" @click="openEditSection(scope.row)">编辑</el-button>
+                        <el-button size="small" type="danger" @click="deleteSection(scope.row)">删除</el-button>
+                      </template>
+                    </el-table-column>
+                  </el-table>
+                  <el-empty
+                    v-if="sectionsOf(row.id).length === 0"
+                    description="该章下暂无节，题目可直接挂在章上"
+                    :image-size="40"
+                  />
+                </div>
+              </template>
+            </el-table-column>
             <el-table-column prop="id" label="ID" width="60" />
             <el-table-column label="所属学科" width="120">
               <template #default="{ row }">{{ subjectName(row.subject_id) }}</template>
             </el-table-column>
             <el-table-column prop="name" label="名称" min-width="160" />
             <el-table-column prop="order_num" label="序号" width="70" align="center" />
+            <el-table-column label="节" width="60" align="center">
+              <template #default="{ row }">{{ sectionsOf(row.id).length }}</template>
+            </el-table-column>
             <el-table-column prop="question_count" label="题目数" width="80" align="center" />
             <el-table-column label="操作" width="140">
               <template #default="{ row }">
@@ -315,8 +426,8 @@ onMounted(loadAll)
       </template>
     </el-dialog>
 
-    <!-- 章节对话框 -->
-    <el-dialog v-model="chapterDlg.visible" :title="chapterDlg.mode === 'create' ? '新增章节' : '编辑章节'" width="520px">
+    <!-- 章对话框 -->
+    <el-dialog v-model="chapterDlg.visible" :title="chapterDlg.mode === 'create' ? '新增章' : '编辑章'" width="520px">
       <el-form label-width="80px">
         <el-form-item label="所属学科" required>
           <el-select v-model="chapterDlg.form.subject_id" :disabled="chapterDlg.mode === 'edit'" style="width:100%">
@@ -336,6 +447,28 @@ onMounted(loadAll)
       <template #footer>
         <el-button @click="chapterDlg.visible = false">取消</el-button>
         <el-button type="primary" @click="submitChapter">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 节对话框 -->
+    <el-dialog v-model="sectionDlg.visible" :title="sectionDlg.mode === 'create' ? '新增节' : '编辑节'" width="480px">
+      <el-form label-width="80px">
+        <el-form-item label="所属章">
+          <el-input :model-value="chapterName(sectionDlg.form.chapter_id)" disabled />
+        </el-form-item>
+        <el-form-item label="名称" required>
+          <el-input v-model="sectionDlg.form.name" placeholder="如：第一节" />
+        </el-form-item>
+        <el-form-item label="序号">
+          <el-input-number v-model="sectionDlg.form.order_num" :min="0" />
+        </el-form-item>
+        <el-form-item label="描述">
+          <el-input v-model="sectionDlg.form.description" type="textarea" :rows="2" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="sectionDlg.visible = false">取消</el-button>
+        <el-button type="primary" @click="submitSection">保存</el-button>
       </template>
     </el-dialog>
 
@@ -365,5 +498,16 @@ onMounted(loadAll)
   justify-content: space-between;
   align-items: center;
   font-weight: 600;
+}
+.section-expand {
+  padding: 8px 16px 12px 48px;
+}
+.section-expand-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
 }
 </style>

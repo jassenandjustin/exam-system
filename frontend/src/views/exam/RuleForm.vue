@@ -1,7 +1,7 @@
 <script setup>
 /**
  * 选题规则表单组件：
- *  - 选择学科、章节（可选）、难度（可选）、抽取题数
+ *  - 选择学科、章/节（可选）、难度（可选）、抽取题数
  *  - 可选按题型分配题数
  *  - 实时显示可用题目数
  */
@@ -28,6 +28,7 @@ const chapterStats = ref(null)
 const form = reactive({
   subject_id: props.subjectId,
   chapter_id: props.chapterId,
+  section_id: null,
   difficulty: props.difficulty,
   question_count: props.questionCount,
   order_num: props.orderNum,
@@ -82,6 +83,13 @@ async function loadChapters(subjectId) {
   } catch { /* silent */ }
 }
 
+// 当前所选章下的节（来自 chapter-stats 的 sections 细分）
+const formSections = computed(() => {
+  if (!form.chapter_id || !chapterStats.value) return []
+  const ch = chapterStats.value.chapters?.find(c => c.id === form.chapter_id)
+  return ch?.sections || []
+})
+
 function emptyTypeCounts() {
   return QUESTION_TYPE_OPTIONS.reduce((acc, item) => {
     acc[item.value] = 0
@@ -104,11 +112,23 @@ function updateAvailableFromStats() {
   if (form.chapter_id) {
     const ch = data.chapters.find(c => c.id === form.chapter_id)
     if (ch) {
-      total = ch.total
-      byType = ch.by_type || emptyTypeCounts()
-      byDifficultyType = ch.by_difficulty_type || {}
-      if (form.difficulty) {
-        total = ch[form.difficulty] || 0
+      if (form.section_id) {
+        const sec = (ch.sections || []).find(s => s.id === form.section_id)
+        if (sec) {
+          total = sec.total
+          byType = sec.by_type || emptyTypeCounts()
+          byDifficultyType = sec.by_difficulty_type || {}
+          if (form.difficulty) {
+            total = sec[form.difficulty] || 0
+          }
+        }
+      } else {
+        total = ch.total
+        byType = ch.by_type || emptyTypeCounts()
+        byDifficultyType = ch.by_difficulty_type || {}
+        if (form.difficulty) {
+          total = ch[form.difficulty] || 0
+        }
       }
     }
   } else if (form.difficulty) {
@@ -141,6 +161,7 @@ async function loadChapterStats(subjectId) {
 
 function onSubjectChange(val) {
   form.chapter_id = null
+  form.section_id = null
   chapters.value = []
   chapterStats.value = null
   if (val) {
@@ -152,6 +173,11 @@ function onSubjectChange(val) {
 }
 
 function onChapterChange() {
+  form.section_id = null
+  updateAvailableFromStats()
+}
+
+function onSectionChange() {
   updateAvailableFromStats()
 }
 
@@ -201,6 +227,7 @@ async function handleSubmit() {
   const payload = {
     subject_id: form.subject_id,
     chapter_id: form.chapter_id,
+    section_id: form.section_id || null,
     difficulty: form.difficulty,
     question_count: form.question_count,
     order_num: form.order_num,
@@ -238,9 +265,15 @@ onMounted(() => {
         </el-select>
       </el-form-item>
 
-      <el-form-item label="章节">
-        <el-select v-model="form.chapter_id" placeholder="全部章节" clearable style="width:160px" @change="onChapterChange">
+      <el-form-item label="章">
+        <el-select v-model="form.chapter_id" placeholder="全部章" clearable style="width:160px" @change="onChapterChange">
           <el-option v-for="c in chapters" :key="c.id" :value="c.id" :label="c.name" />
+        </el-select>
+      </el-form-item>
+
+      <el-form-item label="节">
+        <el-select v-model="form.section_id" placeholder="全部节" clearable style="width:160px" :disabled="!form.chapter_id" @change="onSectionChange">
+          <el-option v-for="s in formSections" :key="s.id" :value="s.id" :label="s.name" />
         </el-select>
       </el-form-item>
 

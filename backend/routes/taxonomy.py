@@ -1,10 +1,10 @@
-"""学科 / 章节 / 标签管理接口（题库元数据）。
+"""学科 / 章 / 节 / 标签管理接口（题库元数据）。
 
 读接口对所有登录用户开放（前端做筛选要用），写接口需要管理员或教师权限。
 """
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from models import db, Subject, Chapter, Tag, Question, QuestionTag, User, UserRole
+from models import db, Subject, Chapter, Section, Tag, Question, QuestionTag, User, UserRole
 
 from access import allowed_subject_ids
 
@@ -111,7 +111,7 @@ def delete_subject(subject_id):
     return jsonify({'message': 'deleted'})
 
 
-# ============ Chapter 章节 ============
+# ============ Chapter 章 ============
 
 @taxonomy_bp.route('/chapters', methods=['GET'])
 @jwt_required(optional=True)
@@ -128,6 +128,7 @@ def list_chapters():
         'description': c.description,
         'order_num': c.order_num,
         'question_count': Question.query.filter_by(chapter_id=c.id).count(),
+        'section_count': Section.query.filter_by(chapter_id=c.id).count(),
     } for c in items])
 
 
@@ -186,7 +187,92 @@ def delete_chapter(chapter_id):
         return jsonify({'error': 'Chapter not found'}), 404
     if Question.query.filter_by(chapter_id=chapter_id).count() > 0:
         return jsonify({'error': 'Chapter has questions, please remove them first'}), 400
+    if Section.query.filter_by(chapter_id=chapter_id).count() > 0:
+        return jsonify({'error': 'Chapter has sections, please remove them first'}), 400
     db.session.delete(c)
+    db.session.commit()
+    return jsonify({'message': 'deleted'})
+
+
+# ============ Section 节 ============
+
+@taxonomy_bp.route('/sections', methods=['GET'])
+@jwt_required(optional=True)
+def list_sections():
+    chapter_id = request.args.get('chapter_id', type=int)
+    q = Section.query
+    if chapter_id:
+        q = q.filter_by(chapter_id=chapter_id)
+    items = q.order_by(Section.chapter_id.asc(), Section.order_num.asc(), Section.id.asc()).all()
+    return jsonify([{
+        'id': s.id,
+        'chapter_id': s.chapter_id,
+        'name': s.name,
+        'description': s.description,
+        'order_num': s.order_num,
+        'question_count': Question.query.filter_by(section_id=s.id).count(),
+    } for s in items])
+
+
+@taxonomy_bp.route('/sections', methods=['POST'])
+@jwt_required()
+def create_section():
+    _u, err = _require_editor()
+    if err:
+        return err
+    data = request.get_json() or {}
+    chapter_id = data.get('chapter_id')
+    name = (data.get('name') or '').strip()
+    if not chapter_id or not name:
+        return jsonify({'error': 'chapter_id and name are required'}), 400
+    if not Chapter.query.get(chapter_id):
+        return jsonify({'error': 'Chapter not found'}), 404
+    s = Section(
+        chapter_id=chapter_id,
+        name=name,
+        description=data.get('description'),
+        order_num=data.get('order_num', 0),
+    )
+    db.session.add(s)
+    db.session.commit()
+    return jsonify({'id': s.id}), 201
+
+
+@taxonomy_bp.route('/sections/<int:section_id>', methods=['PUT'])
+@jwt_required()
+def update_section(section_id):
+    _u, err = _require_editor()
+    if err:
+        return err
+    s = Section.query.get(section_id)
+    if not s:
+        return jsonify({'error': 'Section not found'}), 404
+    data = request.get_json() or {}
+    if 'name' in data:
+        new_name = (data.get('name') or '').strip()
+        if not new_name:
+            return jsonify({'error': 'name cannot be empty'}), 400
+        s.name = new_name
+    if 'description' in data:
+        s.description = data['description']
+    if 'order_num' in data:
+        s.order_num = data['order_num']
+    db.session.commit()
+    return jsonify({'message': 'updated'})
+
+
+@taxonomy_bp.route('/sections/<int:section_id>', methods=['DELETE'])
+@jwt_required()
+def delete_section(section_id):
+    _u, err = _require_editor()
+    if err:
+        return err
+    s = Section.query.get(section_id)
+    if not s:
+        return jsonify({'error': 'Section not found'}), 404
+    if Question.query.filter_by(section_id=section_id).count() > 0:
+        return jsonify({'error': 'Section has questions, please remove them first'}), 400
+    db.session.delete(s)
     db.session.commit()
     return jsonify({'message': 'deleted'})
 

@@ -231,7 +231,11 @@ onMounted(loadPaper)
         <el-table v-else :data="paper.rules" stripe>
           <el-table-column prop="order_num" label="序号" width="60" />
           <el-table-column prop="subject_name" label="学科" width="120" />
-          <el-table-column prop="chapter_name" label="章节" width="160" />
+          <el-table-column label="章 / 节" width="180">
+            <template #default="{ row }">
+              {{ row.chapter_name }}<span v-if="row.section_name"> / {{ row.section_name }}</span>
+            </template>
+          </el-table-column>
           <el-table-column label="难度" width="80">
             <template #default="{ row }">
               {{ row.difficulty ? DIFFICULTY_MAP[row.difficulty] || row.difficulty : '不限' }}

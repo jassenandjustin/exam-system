@@ -15,6 +15,7 @@ async function onStart(cfg) {
   try {
     const params = { subject_id: cfg.subject_id, page: 1, per_page: 20 }
     if (cfg.chapter_id) params.chapter_id = cfg.chapter_id
+    if (cfg.section_id) params.section_id = cfg.section_id
     const { data } = await api.get('/practice/sequential', { params })
     if (!data.questions || data.questions.length === 0) {
       ElMessage.info('没有更多未练习的题目了，建议尝试其它模式')

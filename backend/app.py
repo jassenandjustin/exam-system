@@ -89,6 +89,9 @@ def _ensure_schema_migrations():
             "question_source VARCHAR(20) NOT NULL DEFAULT 'mock'")
         _add_column_if_missing('exams', 'start_time', "start_time DATETIME NULL")
         _add_column_if_missing('exams', 'end_time', "end_time DATETIME NULL")
+        # 章/节两级结构：sections 表由 create_all 创建，这里补已有表的新列
+        _add_column_if_missing('questions', 'section_id', "section_id INTEGER NULL")
+        _add_column_if_missing('exam_question_rules', 'section_id', "section_id INTEGER NULL")
     except Exception as e:
         db.session.rollback()
         print(f'WARNING: schema migration failed: {e}')

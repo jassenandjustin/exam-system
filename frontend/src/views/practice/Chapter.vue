@@ -12,11 +12,11 @@ const loading = ref(false)
 async function onStart(cfg) {
   loading.value = true
   try {
-    const { data } = await api.get('/practice/chapter-practice', {
-      params: { chapter_id: cfg.chapter_id, limit: 30 }
-    })
+    const params = { chapter_id: cfg.chapter_id, limit: 30 }
+    if (cfg.section_id) params.section_id = cfg.section_id
+    const { data } = await api.get('/practice/chapter-practice', { params })
     if (!data.questions || data.questions.length === 0) {
-      ElMessage.info('该章节下暂无题目')
+      ElMessage.info('该章下暂无题目')
       return
     }
     questions.value = data.questions

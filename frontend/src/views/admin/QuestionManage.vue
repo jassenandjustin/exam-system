@@ -3,9 +3,10 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '@/api'
 
-// ===== 元数据：学科/章节/标签 =====
+// ===== 元数据：学科/章·节/标签 =====
 const subjects = ref([])
 const chapters = ref([])
+const sections = ref([])
 const tags = ref([])
 
 // ===== 题目列表 =====
@@ -18,6 +19,7 @@ const query = reactive({
   per_page: 10,
   subject_id: null,
   chapter_id: null,
+  section_id: null,
   question_type: '',
   difficulty: '',
   question_source: '',
@@ -47,16 +49,21 @@ const diffMap = Object.fromEntries(DIFFICULTIES.map(d => [d.value, d]))
 const filteredChapters = computed(() =>
   query.subject_id ? chapters.value.filter(c => c.subject_id === query.subject_id) : chapters.value
 )
+const filterSections = computed(() =>
+  query.chapter_id ? sections.value.filter(s => s.chapter_id === query.chapter_id) : []
+)
 
 async function loadMeta() {
   try {
-    const [s, c, t] = await Promise.all([
+    const [s, c, sec, t] = await Promise.all([
       api.get('/taxonomy/subjects'),
       api.get('/taxonomy/chapters'),
+      api.get('/taxonomy/sections'),
       api.get('/taxonomy/tags')
     ])
     subjects.value = s.data
     chapters.value = c.data
+    sections.value = sec.data
     tags.value = t.data
   } catch (err) {
     ElMessage.error('加载元数据失败')
@@ -69,6 +76,7 @@ async function loadQuestions() {
     const params = { page: query.page, per_page: query.per_page }
     if (query.subject_id) params.subject_id = query.subject_id
     if (query.chapter_id) params.chapter_id = query.chapter_id
+    if (query.section_id) params.section_id = query.section_id
     if (query.question_type) params.question_type = query.question_type
     if (query.difficulty) params.difficulty = query.difficulty
     if (query.question_source) params.question_source = query.question_source
@@ -89,6 +97,11 @@ function onSearch() {
 }
 function onSubjectChange() {
   query.chapter_id = null
+  query.section_id = null
+  onSearch()
+}
+function onFilterChapterChange() {
+  query.section_id = null
   onSearch()
 }
 function onPageChange(p) {
@@ -97,7 +110,7 @@ function onPageChange(p) {
 }
 function resetFilter() {
   Object.assign(query, {
-    page: 1, subject_id: null, chapter_id: null,
+    page: 1, subject_id: null, chapter_id: null, section_id: null,
     question_type: '', difficulty: '', question_source: '', search: ''
   })
   loadQuestions()
@@ -113,6 +126,7 @@ const blankForm = () => ({
   id: null,
   subject_id: null,
   chapter_id: null,
+  section_id: null,
   question_type: 'single_choice',
   title: '',
   content: '',
@@ -138,10 +152,17 @@ const formRules = {
 const formChapters = computed(() =>
   form.subject_id ? chapters.value.filter(c => c.subject_id === form.subject_id) : []
 )
+const formSections = computed(() =>
+  form.chapter_id ? sections.value.filter(s => s.chapter_id === form.chapter_id) : []
+)
 
 function resetForm() {
   Object.assign(form, blankForm())
   formRef.value?.clearValidate()
+}
+function onFormSubjectChange() {
+  form.chapter_id = null
+  form.section_id = null
 }
 
 function openCreate() {
@@ -164,6 +185,7 @@ async function openEdit(row) {
     form.id = data.id
     form.subject_id = data.subject_id
     form.chapter_id = data.chapter_id
+    form.section_id = data.section_id || null
     form.question_type = data.question_type
     form.title = data.title
     form.content = data.content || ''
@@ -216,6 +238,7 @@ function buildPayload() {
   const payload = {
     subject_id: form.subject_id,
     chapter_id: form.chapter_id || null,
+    section_id: form.section_id || null,
     question_type: form.question_type,
     title: form.title,
     content: form.content || null,
@@ -244,6 +267,12 @@ function buildPayload() {
 async function onSubmit() {
   await formRef.value?.validate(async (valid) => {
     if (!valid) return
+
+    // 该章已划分节时必须选到具体节
+    if (form.chapter_id && formSections.value.length > 0 && !form.section_id) {
+      ElMessage.error('该章已划分节，请选择具体节')
+      return
+    }
 
     // 选择题校验答案非空
     if (form.question_type === 'single_choice' && !form.correct_answer) {
@@ -381,15 +410,29 @@ function normalizeImportItem(item, idx) {
   }
   if (!subject_id) errors.push('缺少学科 (subject 或 subject_id)')
 
-  // 章节：可选
+  // 章：可选
   let chapter_id = item.chapter_id || null
   if (!chapter_id && item.chapter) {
     const c = chapters.value.find(x =>
       x.name === String(item.chapter).trim() &&
       (!subject_id || x.subject_id === subject_id)
     )
-    if (!c) errors.push(`章节「${item.chapter}」未找到`)
+    if (!c) errors.push(`章「${item.chapter}」未找到`)
     else chapter_id = c.id
+  }
+
+  // 节：可选；章已划分节时必须提供
+  let section_id = item.section_id || null
+  if (!section_id && item.section) {
+    const sec = sections.value.find(x =>
+      x.name === String(item.section).trim() &&
+      (!chapter_id || x.chapter_id === chapter_id)
+    )
+    if (!sec) errors.push(`节「${item.section}」未找到`)
+    else section_id = sec.id
+  }
+  if (chapter_id && !section_id && sections.value.some(s => s.chapter_id === chapter_id)) {
+    errors.push('该章已划分节，请指定节 (section 或 section_id)')
   }
 
   // 题型
@@ -473,6 +516,7 @@ function normalizeImportItem(item, idx) {
   return {
     subject_id,
     chapter_id,
+    section_id,
     question_type,
     title,
     content: item.content ? String(item.content) : null,
@@ -487,7 +531,7 @@ function normalizeImportItem(item, idx) {
 }
 
 const CSV_HEADERS = [
-  'subject', 'chapter', 'question_type', 'title', 'content',
+  'subject', 'chapter', 'section', 'question_type', 'title', 'content',
   'options', 'correct_answer', 'explanation', 'difficulty', 'score', 'tags', 'question_source'
 ]
 
@@ -621,7 +665,7 @@ async function onJsonFileChange(rawFile) {
 function downloadTemplate(kind) {
   const sample = [
     {
-      subject: '数学', chapter: '第一章',
+      subject: '数学', chapter: '第一章', section: '第一节',
       question_type: 'single_choice',
       title: '1 + 1 等于？', content: '',
       options: ['1', '2', '3', '4'],
@@ -632,7 +676,7 @@ function downloadTemplate(kind) {
       question_source: 'mock'
     },
     {
-      subject: '数学', chapter: '第一章',
+      subject: '数学', chapter: '第一章', section: '第二节',
       question_type: 'multiple_choice',
       title: '哪些是质数？', content: '',
       options: ['2', '3', '4', '6'],
@@ -643,7 +687,7 @@ function downloadTemplate(kind) {
       question_source: 'real'
     },
     {
-      subject: '数学', chapter: '',
+      subject: '数学', chapter: '', section: '',
       question_type: 'true_false',
       title: '0 是自然数', content: '',
       options: '', correct_answer: true,
@@ -707,13 +751,23 @@ onMounted(async () => {
             </el-select>
             <el-select
               v-model="query.chapter_id"
-              placeholder="章节"
+              placeholder="章"
               clearable
               style="width: 140px"
               :disabled="!query.subject_id"
-              @change="onSearch"
+              @change="onFilterChapterChange"
             >
               <el-option v-for="c in filteredChapters" :key="c.id" :value="c.id" :label="c.name" />
+            </el-select>
+            <el-select
+              v-model="query.section_id"
+              placeholder="节"
+              clearable
+              style="width: 140px"
+              :disabled="!query.chapter_id"
+              @change="onSearch"
+            >
+              <el-option v-for="s in filterSections" :key="s.id" :value="s.id" :label="s.name" />
             </el-select>
             <el-select
               v-model="query.question_type"
@@ -763,8 +817,10 @@ onMounted(async () => {
         <el-table-column label="学科" width="120">
           <template #default="{ row }">{{ subjectName(row.subject_id) }}</template>
         </el-table-column>
-        <el-table-column label="章节" width="140">
-          <template #default="{ row }">{{ chapterName(row.chapter_id) }}</template>
+        <el-table-column label="章 / 节" width="160">
+          <template #default="{ row }">
+            {{ chapterName(row.chapter_id) }}<span v-if="row.section_name"> / {{ row.section_name }}</span>
+          </template>
         </el-table-column>
         <el-table-column label="题型" width="100">
           <template #default="{ row }">
@@ -834,17 +890,24 @@ onMounted(async () => {
         v-loading="dlgLoading"
       >
         <el-row :gutter="12">
-          <el-col :span="12">
+          <el-col :span="8">
             <el-form-item label="学科" prop="subject_id">
-              <el-select v-model="form.subject_id" placeholder="选择学科" style="width:100%" @change="form.chapter_id = null">
+              <el-select v-model="form.subject_id" placeholder="选择学科" style="width:100%" @change="onFormSubjectChange">
                 <el-option v-for="s in subjects" :key="s.id" :value="s.id" :label="s.name" />
               </el-select>
             </el-form-item>
           </el-col>
-          <el-col :span="12">
-            <el-form-item label="章节">
-              <el-select v-model="form.chapter_id" placeholder="选填" clearable style="width:100%" :disabled="!form.subject_id">
+          <el-col :span="8">
+            <el-form-item label="章">
+              <el-select v-model="form.chapter_id" placeholder="选填" clearable style="width:100%" :disabled="!form.subject_id" @change="form.section_id = null">
                 <el-option v-for="c in formChapters" :key="c.id" :value="c.id" :label="c.name" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="节" :required="formSections.length > 0">
+              <el-select v-model="form.section_id" :placeholder="formSections.length > 0 ? '请选择节' : '不限节'" clearable style="width:100%" :disabled="!form.chapter_id">
+                <el-option v-for="s in formSections" :key="s.id" :value="s.id" :label="s.name" />
               </el-select>
             </el-form-item>
           </el-col>
@@ -961,7 +1024,7 @@ onMounted(async () => {
       <el-tabs v-model="importMode">
         <el-tab-pane label="JSON 数组" name="json">
           <div class="hint">
-            顶层为数组，每个元素是一道题。学科 / 章节 / 标签可用名称（subject / chapter / tags），
+            顶层为数组，每个元素是一道题。学科 / 章 / 节 / 标签可用名称（subject / chapter / section / tags），
             前端会自动转成 ID。点
             <el-link type="primary" @click="downloadTemplate('json')">下载 JSON 模板</el-link>
             查看示例。
@@ -1002,7 +1065,7 @@ onMounted(async () => {
             v-model="importCsvText"
             type="textarea"
             :rows="12"
-            placeholder="subject,chapter,question_type,title,...&#10;数学,第一章,single_choice,1+1=?,..."
+            placeholder="subject,chapter,section,question_type,title,...&#10;数学,第一章,第一节,single_choice,1+1=?,..."
           />
         </el-tab-pane>
       </el-tabs>

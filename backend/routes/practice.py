@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from models import db, Question, QuestionType, StudyRecord, ErrorNote, Favorite, Subject, Chapter
+from models import db, Question, QuestionType, StudyRecord, ErrorNote, Favorite, Subject, Chapter, Section
 from datetime import datetime, timedelta
 import random
 
@@ -18,6 +18,7 @@ def _serialize_question(q, favorite_ids=None):
         'id': q.id,
         'subject_id': q.subject_id,
         'chapter_id': q.chapter_id,
+        'section_id': q.section_id,
         'title': q.title,
         'content': q.content,
         'question_type': q.question_type.value,
@@ -47,6 +48,7 @@ def sequential_practice():
     user = current_user()
     subject_id = request.args.get('subject_id', type=int)
     chapter_id = request.args.get('chapter_id', type=int)
+    section_id = request.args.get('section_id', type=int)
     page = request.args.get('page', 1, type=int)
     per_page = request.args.get('per_page', 10, type=int)
 
@@ -68,6 +70,8 @@ def sequential_practice():
     query = Question.query.filter_by(subject_id=subject_id)
     if chapter_id:
         query = query.filter_by(chapter_id=chapter_id)
+    if section_id:
+        query = query.filter_by(section_id=section_id)
     if practiced_question_ids:
         query = query.filter(~Question.id.in_(practiced_question_ids))
 
@@ -325,6 +329,7 @@ def remove_favorite(question_id):
 def chapter_practice():
     user = current_user()
     chapter_id = request.args.get('chapter_id', type=int)
+    section_id = request.args.get('section_id', type=int)
     limit = request.args.get('limit', 20, type=int)
 
     if not chapter_id:
@@ -334,6 +339,11 @@ def chapter_practice():
     if not chapter:
         return jsonify({'error': 'Chapter not found'}), 404
 
+    if section_id:
+        section = Section.query.get(section_id)
+        if not section or section.chapter_id != chapter_id:
+            return jsonify({'error': 'Section not found in this chapter'}), 404
+
     gate_err = gate_subject(user, chapter.subject_id)
     if gate_err:
         return gate_err
@@ -341,7 +351,10 @@ def chapter_practice():
     user_id = user.id
 
     #
-    questions = Question.query.filter_by(chapter_id=chapter_id).limit(limit).all()
+    query = Question.query.filter_by(chapter_id=chapter_id)
+    if section_id:
+        query = query.filter_by(section_id=section_id)
+    questions = query.limit(limit).all()
 
     fav_set = _favorite_id_set(user_id, [q.id for q in questions])
     result = [_serialize_question(q, fav_set) for q in questions]

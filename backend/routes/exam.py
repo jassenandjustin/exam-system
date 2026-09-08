@@ -14,7 +14,7 @@ from models import (
     db, Question, QuestionType, DifficultyLevel, ExamType,
     Exam, ExamQuestionRule, ExamQuestion, ExamQuestionTypeDistribution,
     ExamRecord, ExamAnswer, StudyRecord, ErrorNote,
-    User, UserRole, Subject, Chapter,
+    User, UserRole, Subject, Chapter, Section,
 )
 from datetime import datetime, timedelta, timezone
 
@@ -152,10 +152,12 @@ def _question_type_label(question_type):
     return QUESTION_TYPE_LABELS.get(question_type, question_type.value)
 
 
-def _base_rule_question_query(subject_id, chapter_id=None, difficulty=None):
+def _base_rule_question_query(subject_id, chapter_id=None, difficulty=None, section_id=None):
     q = Question.query.filter_by(subject_id=subject_id)
     if chapter_id:
         q = q.filter_by(chapter_id=chapter_id)
+    if section_id:
+        q = q.filter_by(section_id=section_id)
     if difficulty:
         q = q.filter(Question.difficulty == difficulty)
     return q
@@ -194,8 +196,8 @@ def _parse_type_distribution(data):
     return result, None
 
 
-def _count_available_by_type(subject_id, chapter_id=None, difficulty=None):
-    base_q = _base_rule_question_query(subject_id, chapter_id, difficulty)
+def _count_available_by_type(subject_id, chapter_id=None, difficulty=None, section_id=None):
+    base_q = _base_rule_question_query(subject_id, chapter_id, difficulty, section_id)
     return {
         question_type.value: base_q.filter(Question.question_type == question_type).count()
         for question_type in QuestionType
@@ -215,13 +217,16 @@ def _serialize_rule(rule):
         rule.subject_id,
         rule.chapter_id,
         rule.difficulty,
+        rule.section_id,
     )
     return {
         'id': rule.id,
         'subject_id': rule.subject_id,
         'subject_name': rule.subject.name if rule.subject else '',
         'chapter_id': rule.chapter_id,
-        'chapter_name': rule.chapter.name if rule.chapter else '全部章节',
+        'chapter_name': rule.chapter.name if rule.chapter else '全部章',
+        'section_id': rule.section_id,
+        'section_name': rule.section.name if rule.section else None,
         'difficulty': rule.difficulty.value if rule.difficulty else None,
         'question_count': rule.question_count,
         'order_num': rule.order_num,
@@ -244,7 +249,18 @@ def _validate_rule_payload(data):
     if chapter_id:
         chapter = Chapter.query.get(chapter_id)
         if not chapter or chapter.subject_id != subject.id:
-            return None, '章节不存在或不属于所选学科'
+            return None, '章不存在或不属于所选学科'
+
+    section_id = data.get('section_id')
+    if section_id:
+        section = Section.query.get(section_id)
+        if not section:
+            return None, '节不存在'
+        # 未显式选章时从节推导，保持两列一致
+        if not chapter_id:
+            chapter_id = section.chapter_id
+        elif section.chapter_id != chapter_id:
+            return None, '节不存在或不属于所选章'
 
     difficulty, error = _parse_difficulty(data.get('difficulty'))
     if error:
@@ -261,7 +277,7 @@ def _validate_rule_payload(data):
     if error:
         return None, error
 
-    available_by_type = _count_available_by_type(subject_id, chapter_id, difficulty)
+    available_by_type = _count_available_by_type(subject_id, chapter_id, difficulty, section_id)
     available = sum(available_by_type.values())
 
     if type_distribution:
@@ -278,6 +294,7 @@ def _validate_rule_payload(data):
     return {
         'subject_id': subject_id,
         'chapter_id': chapter_id,
+        'section_id': section_id,
         'difficulty': difficulty,
         'question_count': question_count,
         'type_distribution': type_distribution,
@@ -488,6 +505,7 @@ def add_rule(paper_id):
         exam_id=paper_id,
         subject_id=payload['subject_id'],
         chapter_id=payload['chapter_id'],
+        section_id=payload['section_id'],
         difficulty=payload['difficulty'],
         question_count=payload['question_count'],
         order_num=data.get('order_num', 0),
@@ -516,9 +534,17 @@ def update_rule(paper_id, rule_id):
         return jsonify({'error': '规则不存在'}), 404
 
     data = request.get_json() or {}
+    # 章变了但没给新节 → 清掉旧节；显式给节 → 覆盖（校验器会自动补齐所属章）
+    if 'section_id' in data:
+        merged_section_id = data['section_id']
+    elif 'chapter_id' in data and data['chapter_id'] != rule.chapter_id:
+        merged_section_id = None
+    else:
+        merged_section_id = rule.section_id
     merged = {
         'subject_id': data.get('subject_id', rule.subject_id),
         'chapter_id': data.get('chapter_id', rule.chapter_id),
+        'section_id': merged_section_id,
         'difficulty': data.get('difficulty', rule.difficulty.value if rule.difficulty else ''),
         'question_count': data.get('question_count', rule.question_count),
     }
@@ -533,6 +559,7 @@ def update_rule(paper_id, rule_id):
 
     rule.subject_id = payload['subject_id']
     rule.chapter_id = payload['chapter_id']
+    rule.section_id = payload['section_id']
     rule.difficulty = payload['difficulty']
     rule.question_count = payload['question_count']
     if 'order_num' in data:
@@ -600,7 +627,7 @@ def generate_questions(paper_id):
             selection_groups = [(None, rule.question_count)]
 
         for question_type, count in selection_groups:
-            q = _base_rule_question_query(rule.subject_id, rule.chapter_id, rule.difficulty)
+            q = _base_rule_question_query(rule.subject_id, rule.chapter_id, rule.difficulty, rule.section_id)
             if question_type:
                 q = q.filter(Question.question_type == question_type)
             # 排除已选的题目，避免跨规则重复
@@ -816,21 +843,54 @@ def review_paper(paper_id):
 @exam_bp.route('/subjects/<int:subject_id>/chapter-stats', methods=['GET'])
 @jwt_required()
 def chapter_stats(subject_id):
-    """获取学科下各章节的题目数量统计（含按难度和题型分组）。"""
+    """获取学科下各章/节的题目数量统计（含按难度和题型分组）。
+
+    每章附带 sections 细分：题目两列同写（chapter_id + section_id），直接按
+    section_id 聚合即可得到各节数；章级 total 仍含全部节的题（按 chapter_id 聚合）。
+    """
     def build_type_counts(base_q):
         return {
             question_type.value: base_q.filter(Question.question_type == question_type).count()
             for question_type in QuestionType
         }
 
-    def build_difficulty_type_counts(subject_id, chapter_id=None):
+    def build_difficulty_type_counts(subject_id, chapter_id=None, section_id=None):
         data = {}
         for difficulty in DifficultyLevel:
             q = Question.query.filter_by(subject_id=subject_id, difficulty=difficulty)
-            if chapter_id:
+            if section_id:
+                q = q.filter_by(section_id=section_id)
+            elif chapter_id:
                 q = q.filter_by(chapter_id=chapter_id)
             data[difficulty.value] = build_type_counts(q)
         return data
+
+    def build_section_breakdown(chapter):
+        """该章下各节的题目统计（按 section_id 聚合）。"""
+        sections = Section.query.filter_by(chapter_id=chapter.id).order_by(
+            Section.order_num.asc(), Section.id.asc()
+        ).all()
+        out = []
+        for s in sections:
+            sec_q = Question.query.filter_by(subject_id=subject_id, section_id=s.id)
+            out.append({
+                'id': s.id,
+                'name': s.name,
+                'order_num': s.order_num,
+                'total': sec_q.count(),
+                'easy': Question.query.filter_by(
+                    subject_id=subject_id, section_id=s.id, difficulty=DifficultyLevel.EASY
+                ).count(),
+                'medium': Question.query.filter_by(
+                    subject_id=subject_id, section_id=s.id, difficulty=DifficultyLevel.MEDIUM
+                ).count(),
+                'hard': Question.query.filter_by(
+                    subject_id=subject_id, section_id=s.id, difficulty=DifficultyLevel.HARD
+                ).count(),
+                'by_type': build_type_counts(sec_q),
+                'by_difficulty_type': build_difficulty_type_counts(subject_id, section_id=s.id),
+            })
+        return out
 
     chapters = Chapter.query.filter_by(subject_id=subject_id).order_by(Chapter.order_num.asc()).all()
     result = []
@@ -850,6 +910,7 @@ def chapter_stats(subject_id):
             'hard': hard,
             'by_type': build_type_counts(base_q),
             'by_difficulty_type': build_difficulty_type_counts(subject_id, c.id),
+            'sections': build_section_breakdown(c),
         })
     # 整科统计
     subject_q = Question.query.filter_by(subject_id=subject_id)

@@ -19,7 +19,7 @@ const ClassManage = defineAsyncComponent(() => import('./admin/ClassManage.vue')
       <el-tab-pane name="questions" label="题库管理">
         <QuestionManage v-if="tab === 'questions'" />
       </el-tab-pane>
-      <el-tab-pane name="taxonomy" label="学科 / 章节 / 标签">
+      <el-tab-pane name="taxonomy" label="学科 / 章·节 / 标签">
         <SubjectManage v-if="tab === 'taxonomy'" />
       </el-tab-pane>
       <el-tab-pane name="classes" label="班级管理">

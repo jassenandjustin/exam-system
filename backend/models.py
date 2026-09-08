@@ -104,6 +104,23 @@ class Chapter(db.Model):
 
     # 关系
     questions = db.relationship('Question', backref='chapter', lazy=True)
+    sections = db.relationship('Section', backref='chapter', lazy=True,
+                                cascade='all, delete-orphan')
+
+class Section(db.Model):
+    """节：章下的二级分类。题目挂节时 chapter_id / section_id 两列同写，
+    按章查询天然包含所有节的题。"""
+    __tablename__ = 'sections'
+
+    id = db.Column(db.Integer, primary_key=True)
+    chapter_id = db.Column(db.Integer, db.ForeignKey('chapters.id'), nullable=False)
+    name = db.Column(db.String(100), nullable=False)
+    description = db.Column(db.Text, nullable=True)
+    order_num = db.Column(db.Integer, default=0)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    # 关系
+    questions = db.relationship('Question', backref='section', lazy=True)
 
 class Tag(db.Model):
     __tablename__ = 'tags'
@@ -122,6 +139,7 @@ class Question(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     subject_id = db.Column(db.Integer, db.ForeignKey('subjects.id'), nullable=False)
     chapter_id = db.Column(db.Integer, db.ForeignKey('chapters.id'), nullable=True)
+    section_id = db.Column(db.Integer, db.ForeignKey('sections.id'), nullable=True)
     question_type = db.Column(db.Enum(QuestionType), nullable=False)
     title = db.Column(db.Text, nullable=False)
     content = db.Column(db.Text, nullable=True)  # 题干详细内容
@@ -218,6 +236,7 @@ class ExamQuestionRule(db.Model):
     exam_id = db.Column(db.Integer, db.ForeignKey('exams.id'), nullable=False)
     subject_id = db.Column(db.Integer, db.ForeignKey('subjects.id'), nullable=False)
     chapter_id = db.Column(db.Integer, db.ForeignKey('chapters.id'), nullable=True)  # 可空=整科
+    section_id = db.Column(db.Integer, db.ForeignKey('sections.id'), nullable=True)  # 可空=整章
     difficulty = db.Column(db.Enum(DifficultyLevel), nullable=True)  # 可空=不限难度
     question_count = db.Column(db.Integer, nullable=False)           # 抽取题数
     order_num = db.Column(db.Integer, default=0)
@@ -225,6 +244,7 @@ class ExamQuestionRule(db.Model):
     # 关系
     subject = db.relationship('Subject')
     chapter = db.relationship('Chapter')
+    section = db.relationship('Section')
     type_distributions = db.relationship(
         'ExamQuestionTypeDistribution',
         backref='rule',

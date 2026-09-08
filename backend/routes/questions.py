@@ -2,7 +2,7 @@ from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from models import (
     db, Question, QuestionType, DifficultyLevel,
-    Subject, Chapter, Tag, QuestionTag,
+    Subject, Chapter, Section, Tag, QuestionTag,
     StudyRecord, ErrorNote, Favorite, ExamAnswer,
     User, UserRole,
 )
@@ -21,6 +21,30 @@ def _validated_question_source(value):
         return None, '题目来源无效（real=真题 / mock=模拟题）'
     return source, None
 
+
+def _resolve_chapter_section(data):
+    """解析题目的章/节归属，返回 (chapter_id, section_id, err)。
+
+    规则：选了节 → 章从节推导（两列同写）；只给章 → 章下已建节时必须选到节。
+    """
+    section_id = data.get('section_id')
+    if section_id:
+        section = Section.query.get(section_id)
+        if not section:
+            return None, None, '节不存在'
+        return section.chapter_id, section.id, None
+
+    chapter_id = data.get('chapter_id')
+    if chapter_id:
+        chapter = Chapter.query.get(chapter_id)
+        if not chapter:
+            return None, None, '章不存在'
+        if Section.query.filter_by(chapter_id=chapter_id).count() > 0:
+            return None, None, '该章已划分节，请选择具体节'
+        return chapter_id, None, None
+
+    return None, None, None
+
 #
 @question_bp.route('', methods=['GET'])
 @jwt_required(optional=True)
@@ -28,6 +52,7 @@ def get_questions():
     #
     subject_id = request.args.get('subject_id', type=int)
     chapter_id = request.args.get('chapter_id', type=int)
+    section_id = request.args.get('section_id', type=int)
     question_type = request.args.get('question_type')
     difficulty = request.args.get('difficulty')
     question_source = request.args.get('question_source')
@@ -43,6 +68,8 @@ def get_questions():
         query = query.filter_by(subject_id=subject_id)
     if chapter_id:
         query = query.filter_by(chapter_id=chapter_id)
+    if section_id:
+        query = query.filter_by(section_id=section_id)
     if question_type:
         query = query.filter_by(question_type=QuestionType(question_type))
     if difficulty:
@@ -70,6 +97,8 @@ def get_questions():
             'id': q.id,
             'subject_id': q.subject_id,
             'chapter_id': q.chapter_id,
+            'section_id': q.section_id,
+            'section_name': q.section.name if q.section else None,
             'question_type': q.question_type.value,
             'title': q.title,
             'content': q.content,
@@ -105,6 +134,8 @@ def get_question(question_id):
         'id': question.id,
         'subject_id': question.subject_id,
         'chapter_id': question.chapter_id,
+        'section_id': question.section_id,
+        'section_name': question.section.name if question.section else None,
         'question_type': question.question_type.value,
         'title': question.title,
         'content': question.content,
@@ -132,21 +163,27 @@ def create_question():
 
     data = request.get_json()
 
-    #
-    required_fields = ['subject_id', 'question_type', 'title', 'correct_answer']
-    for field in required_fields:
+    # correct_answer 可能为布尔 False（判断题「错误」），不能用 truthy 判断
+    for field in ('subject_id', 'question_type', 'title'):
         if not data.get(field):
             return jsonify({'error': f'{field} is required'}), 400
+    if data.get('correct_answer') is None:
+        return jsonify({'error': 'correct_answer is required'}), 400
 
     source, source_err = _validated_question_source(data.get('question_source'))
     if source_err:
         return jsonify({'error': source_err}), 400
 
+    chapter_id, section_id, cs_err = _resolve_chapter_section(data)
+    if cs_err:
+        return jsonify({'error': cs_err}), 400
+
     #
     try:
         question = Question(
             subject_id=data['subject_id'],
-            chapter_id=data.get('chapter_id'),
+            chapter_id=chapter_id,
+            section_id=section_id,
             question_type=QuestionType(data['question_type']),
             title=data['title'],
             content=data.get('content'),
@@ -200,8 +237,30 @@ def update_question(question_id):
         #
         if data.get('subject_id'):
             question.subject_id = data['subject_id']
-        if data.get('chapter_id') is not None:
-            question.chapter_id = data['chapter_id']
+        # 章/节归属：选了节 → 从节推导章（两列同写）；只挂章 → 章下已建节时必须选节
+        if 'section_id' in data and data['section_id'] is not None:
+            section = Section.query.get(data['section_id'])
+            if not section:
+                return jsonify({'error': '节不存在'}), 400
+            question.chapter_id = section.chapter_id
+            question.section_id = section.id
+        elif 'chapter_id' in data:
+            if data['chapter_id'] is None:
+                question.chapter_id = None
+                question.section_id = None
+            else:
+                chapter = Chapter.query.get(data['chapter_id'])
+                if not chapter:
+                    return jsonify({'error': '章不存在'}), 400
+                if Section.query.filter_by(chapter_id=data['chapter_id']).count() > 0:
+                    return jsonify({'error': '该章已划分节，请选择具体节'}), 400
+                question.chapter_id = data['chapter_id']
+                question.section_id = None
+        elif 'section_id' in data:
+            # 只把节置空、章保持：章下已建节时不允许脱离节
+            if question.chapter_id and Section.query.filter_by(chapter_id=question.chapter_id).count() > 0:
+                return jsonify({'error': '该章已划分节，请选择具体节'}), 400
+            question.section_id = None
         if data.get('question_type'):
             question.question_type = QuestionType(data['question_type'])
         if data.get('title'):
@@ -311,11 +370,16 @@ def batch_import_questions():
             if source_err:
                 raise ValueError(source_err)
 
+            chapter_id, section_id, cs_err = _resolve_chapter_section(q_data)
+            if cs_err:
+                raise ValueError(cs_err)
+
             # 用 savepoint 让单行失败不影响整个批次
             with db.session.begin_nested():
                 question = Question(
                     subject_id=q_data['subject_id'],
-                    chapter_id=q_data.get('chapter_id'),
+                    chapter_id=chapter_id,
+                    section_id=section_id,
                     question_type=QuestionType(q_data['question_type']),
                     title=q_data['title'],
                     content=q_data.get('content'),

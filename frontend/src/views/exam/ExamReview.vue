@@ -2,7 +2,7 @@
 /**
  * 试卷回顾（教师/管理员）：
  *  - 总体情况：参加 / 进行中 / 平均分 / 及格（≥60% 总分）/ 优秀（≥85% 总分）
- *  - 章节统计：正确人数、正确率、薄弱章节（<60%）高亮
+ *  - 章统计：正确人数、正确率、薄弱章（<60%）高亮
  *  - 试题回顾：每题答对/答错人数与正确率（最差在前）
  */
 import { computed, onMounted, ref } from 'vue'
@@ -164,8 +164,8 @@ onMounted(loadReview)
             </el-col>
           </el-row>
 
-          <!-- 章节统计 -->
-          <div class="section-title">章节正确情况</div>
+          <!-- 章统计 -->
+          <div class="section-title">章正确情况</div>
           <template v-if="chapters.length">
             <el-alert
               v-if="weakChapters.length"
@@ -175,13 +175,13 @@ onMounted(loadReview)
               class="weak-alert"
             >
               <template #title>
-                薄弱章节：{{ weakChapters.map(c => c.chapter_name).join('、') }}（正确率低于 60%）
+                薄弱章：{{ weakChapters.map(c => c.chapter_name).join('、') }}（正确率低于 60%）
               </template>
             </el-alert>
             <el-row :gutter="16">
               <el-col :xs="24" :md="12">
                 <el-table :data="chapters" stripe size="small">
-                  <el-table-column prop="chapter_name" label="章节" min-width="120" />
+                  <el-table-column prop="chapter_name" label="章" min-width="120" />
                   <el-table-column prop="question_count" label="卷内题数" width="90" align="center" />
                   <el-table-column prop="answered" label="答题记录" width="90" align="center" />
                   <el-table-column prop="correct_people" label="正确人数" width="90" align="center" />
@@ -206,7 +206,7 @@ onMounted(loadReview)
               </el-col>
             </el-row>
           </template>
-          <el-empty v-else description="试卷题目均未分章" :image-size="80" />
+          <el-empty v-else description="试卷题目均未挂章" :image-size="80" />
 
           <!-- 试题回顾 -->
           <div class="section-title">试题回顾</div>
