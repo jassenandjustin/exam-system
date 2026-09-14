@@ -92,6 +92,8 @@ def _ensure_schema_migrations():
         # 章/节两级结构：sections 表由 create_all 创建，这里补已有表的新列
         _add_column_if_missing('questions', 'section_id', "section_id INTEGER NULL")
         _add_column_if_missing('exam_question_rules', 'section_id', "section_id INTEGER NULL")
+        # 学生真实姓名（注册时采集；存量用户为 NULL，导出成绩时回退用户名）
+        _add_column_if_missing('users', 'name', "name VARCHAR(50) NULL")
     except Exception as e:
         db.session.rollback()
         print(f'WARNING: schema migration failed: {e}')

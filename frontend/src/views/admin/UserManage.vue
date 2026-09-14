@@ -312,6 +312,9 @@ onMounted(() => {
       <el-table v-loading="tableLoading" :data="users" stripe>
         <el-table-column prop="id" label="ID" width="60" />
         <el-table-column prop="username" label="用户名" min-width="120" />
+        <el-table-column label="姓名" min-width="100">
+          <template #default="{ row }">{{ row.name || '—' }}</template>
+        </el-table-column>
         <el-table-column prop="email" label="邮箱" min-width="180" />
         <el-table-column prop="phone" label="手机" width="130">
           <template #default="{ row }">{{ row.phone || '—' }}</template>

@@ -11,6 +11,7 @@ const loading = ref(false)
 const classes = ref([])
 const form = reactive({
   username: '',
+  name: '',           // 学生真实姓名（学生必填，教师不采集）
   email: '',
   phone: '',
   password: '',
@@ -24,6 +25,17 @@ const rules = {
   username: [
     { required: true, message: '请输入用户名', trigger: 'blur' },
     { min: 3, max: 50, message: '长度 3-50 个字符', trigger: 'blur' }
+  ],
+  name: [
+    {
+      validator: (_r, value, cb) => {
+        // 仅学生必填真实姓名；教师不采集
+        if (form.role === 'student' && !value) cb(new Error('请输入姓名'))
+        else cb()
+      },
+      trigger: 'blur'
+    },
+    { max: 50, message: '长度不超过 50 个字符', trigger: 'blur' }
   ],
   email: [
     { required: true, message: '请输入邮箱', trigger: 'blur' },
@@ -93,6 +105,7 @@ async function onSubmit() {
       role: form.role,
       class_ids: form.role === 'student' ? [form.classId] : [...form.teacherClassIds]
     }
+    if (form.role === 'student') payload.name = form.name
     if (form.phone) payload.phone = form.phone
 
     try {
@@ -128,6 +141,9 @@ async function onSubmit() {
         </el-form-item>
         <el-form-item label="用户名" prop="username">
           <el-input v-model="form.username" placeholder="3-50 个字符" />
+        </el-form-item>
+        <el-form-item v-if="form.role === 'student'" label="姓名" prop="name">
+          <el-input v-model="form.name" placeholder="请输入真实姓名" />
         </el-form-item>
         <el-form-item label="邮箱" prop="email">
           <el-input v-model="form.email" placeholder="example@mail.com" />

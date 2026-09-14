@@ -60,6 +60,11 @@ def register():
     if role_str not in ('student', 'teacher'):
         return jsonify({'error': 'Invalid role for registration'}), 400
 
+    # 学生注册必填真实姓名（教师不采集）
+    name = (data.get('name') or '').strip()
+    if role_str == 'student' and not name:
+        return jsonify({'error': '请输入姓名'}), 400
+
     class_ids = data.get('class_ids')
     if class_ids is None:
         class_ids = []
@@ -84,6 +89,7 @@ def register():
     hashed_password = bcrypt.hashpw(data['password'].encode('utf-8'), bcrypt.gensalt())
     new_user = User(
         username=data['username'],
+        name=(name if role_str == 'student' else None),
         email=data['email'],
         password_hash=hashed_password.decode('utf-8'),
         phone=data.get('phone'),
@@ -135,6 +141,7 @@ def login():
         'user': {
             'id': user.id,
             'username': user.username,
+            'name': user.name,
             'email': user.email,
             'role': user.role.value,
             'status': user.status,
@@ -156,6 +163,7 @@ def get_current_user():
     return jsonify({
         'id': user.id,
         'username': user.username,
+        'name': user.name,
         'email': user.email,
         'phone': user.phone,
         'role': user.role.value,
@@ -426,6 +434,7 @@ def admin_list_users():
     items = [{
         'id': u.id,
         'username': u.username,
+        'name': u.name,
         'email': u.email,
         'phone': u.phone,
         'role': u.role.value,

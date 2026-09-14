@@ -118,6 +118,7 @@ async function onDeleteAccount() {
     <el-card v-if="profile" class="info-card">
       <el-descriptions :column="1" border>
         <el-descriptions-item label="用户名">{{ profile.username }}</el-descriptions-item>
+        <el-descriptions-item label="姓名">{{ profile.name || '—' }}</el-descriptions-item>
         <el-descriptions-item label="邮箱">{{ profile.email }}</el-descriptions-item>
         <el-descriptions-item label="手机">{{ profile.phone || '未设置' }}</el-descriptions-item>
         <el-descriptions-item label="角色">{{ profile.role }}</el-descriptions-item>

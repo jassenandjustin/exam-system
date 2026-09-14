@@ -5,7 +5,7 @@
 - 学生端：获取可用试卷、从试卷开始考试、暂存/提交、历史/进行中
 - 辅助：学科章节题目统计
 """
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, send_file
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from sqlalchemy import desc, func, case
 from functools import wraps
@@ -14,9 +14,12 @@ from models import (
     db, Question, QuestionType, DifficultyLevel, ExamType,
     Exam, ExamQuestionRule, ExamQuestion, ExamQuestionTypeDistribution,
     ExamRecord, ExamAnswer, StudyRecord, ErrorNote,
-    User, UserRole, Subject, Chapter, Section,
+    User, UserRole, Subject, Chapter, Section, SchoolClass, ClassMember,
 )
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
+from openpyxl import Workbook
+from openpyxl.styles import Font
 
 from access import allowed_subject_ids
 
@@ -323,6 +326,18 @@ def list_papers():
         papers = Exam.query.order_by(desc(Exam.created_at)).all()
     else:
         papers = Exam.query.filter_by(created_by=user.id).order_by(desc(Exam.created_at)).all()
+
+    # 各试卷已交卷人数（distinct 学生），前端据此判断「成绩导出」按钮可见性
+    sub_counts = {}
+    paper_ids = [p.id for p in papers]
+    if paper_ids:
+        rows = db.session.query(
+            ExamRecord.exam_id, func.count(func.distinct(ExamRecord.user_id))
+        ).filter(
+            ExamRecord.exam_id.in_(paper_ids), ExamRecord.submitted_at.isnot(None)
+        ).group_by(ExamRecord.exam_id).all()
+        sub_counts = {eid: cnt for eid, cnt in rows}
+
     return jsonify([{
         'id': p.id,
         'name': p.name,
@@ -339,6 +354,7 @@ def list_papers():
         'is_owner': p.created_by == user.id,
         'rule_count': len(p.question_rules),
         'question_count': len(p.exam_questions),
+        'submitted_count': sub_counts.get(p.id, 0),
         'created_at': p.created_at.isoformat() + 'Z',
         'updated_at': p.updated_at.isoformat() + 'Z',
     } for p in papers])
@@ -836,6 +852,170 @@ def review_paper(paper_id):
         'chapters': chapters,
         'questions': questions,
     })
+
+
+# ---- 成绩导出 ----
+
+def _paper_visible_or_404(paper_id, user):
+    """试卷可见性校验：非 owner 且非 admin 视为不存在（404，隐藏存在性）。
+
+    与 review_paper 的权限口径一致：自己的卷或管理员可见，其余一律 404。
+    """
+    paper = Exam.query.get(paper_id)
+    if not paper or (user.role != UserRole.ADMIN and paper.created_by != user.id):
+        return None, (jsonify({'error': '试卷不存在'}), 404)
+    return paper, None
+
+
+@exam_bp.route('/papers/<int:paper_id>/score-classes', methods=['GET'])
+@jwt_required()
+@teacher_required
+def paper_score_classes(paper_id):
+    """成绩导出前置：返回该试卷「有交卷记录」的班级列表 [{class_id, class_name, count}]。
+
+    count = 该班已交卷的 distinct 学生数。用于前端「一键下载全部班级」时先取清单。
+    """
+    user = _current_user()
+    paper, err = _paper_visible_or_404(paper_id, user)
+    if err:
+        return err
+
+    # 已交卷的学生（distinct user_id）
+    submitted_user_ids = [
+        r[0] for r in db.session.query(func.distinct(ExamRecord.user_id))
+        .filter(ExamRecord.exam_id == paper_id,
+                ExamRecord.submitted_at.isnot(None)).all()
+    ]
+    if not submitted_user_ids:
+        return jsonify([])
+
+    # 学生 → 班级（ClassMember），按班级聚合 distinct 学生数
+    cm_rows = db.session.query(
+        ClassMember.class_id, func.count(func.distinct(ClassMember.user_id))
+    ).filter(ClassMember.user_id.in_(submitted_user_ids)) \
+     .group_by(ClassMember.class_id).all()
+    class_ids = [cid for cid, _ in cm_rows]
+    class_map = {
+        c.id: c.name
+        for c in SchoolClass.query.filter(SchoolClass.id.in_(class_ids)).all()
+    } if class_ids else {}
+
+    result = [
+        {'class_id': cid, 'class_name': class_map.get(cid, f'班级{cid}'), 'count': cnt}
+        for cid, cnt in cm_rows
+    ]
+    result.sort(key=lambda x: x['class_name'])
+    return jsonify(result)
+
+
+@exam_bp.route('/papers/<int:paper_id>/scores/export', methods=['GET'])
+@jwt_required()
+@teacher_required
+def paper_scores_export(paper_id):
+    """按班级导出成绩 Excel：列 [序号, 姓名, <各题型得分>, 总成绩]，按总成绩降序。
+
+    文件名「试卷名_班级名.xlsx」。班级无交卷记录 → 400，不生成空表。
+    多次开考按 user_id 取最新 submitted_at 的 record（防御性，与交卷语义一致）。
+    """
+    user = _current_user()
+    paper, err = _paper_visible_or_404(paper_id, user)
+    if err:
+        return err
+
+    class_id = request.args.get('class_id', type=int)
+    if not class_id:
+        return jsonify({'error': '缺少班级参数'}), 400
+    cls = SchoolClass.query.get(class_id)
+    if not cls:
+        return jsonify({'error': '班级不存在'}), 404
+
+    # 该班当前学生
+    class_user_ids = [cm.user_id
+                      for cm in ClassMember.query.filter_by(class_id=class_id).all()]
+    if not class_user_ids:
+        return jsonify({'error': '该班级暂无交卷记录'}), 400
+
+    # 该班已交卷记录：按 submitted_at 升序遍历，后出现的覆盖前者 → 保留每人最新一次
+    records = ExamRecord.query.filter(
+        ExamRecord.exam_id == paper_id,
+        ExamRecord.submitted_at.isnot(None),
+        ExamRecord.user_id.in_(class_user_ids),
+    ).order_by(ExamRecord.submitted_at.asc()).all()
+    latest_by_user = {}
+    for r in records:
+        latest_by_user[r.user_id] = r
+    submissions = list(latest_by_user.values())
+    if not submissions:
+        return jsonify({'error': '该班级暂无交卷记录'}), 400
+
+    # 卷内出现的题型（决定列），按固定顺序优先排列
+    type_order = [
+        QuestionType.SINGLE_CHOICE, QuestionType.MULTIPLE_CHOICE,
+        QuestionType.FILL_IN_BLANK, QuestionType.TRUE_FALSE,
+        QuestionType.SUBJECTIVE,
+    ]
+    present_types = [
+        row[0] for row in db.session.query(Question.question_type)
+        .join(ExamQuestion, ExamQuestion.question_id == Question.id)
+        .filter(ExamQuestion.exam_id == paper_id).distinct().all()
+    ]
+    ordered_types = [t for t in type_order if t in present_types] + \
+                    [t for t in present_types if t not in type_order]
+
+    def _type_scores_of(record):
+        """该记录各题型的得分（ExamAnswer JOIN Question 按 question_type 聚合）。"""
+        rows = db.session.query(
+            Question.question_type, func.sum(ExamAnswer.score)
+        ).join(ExamAnswer, ExamAnswer.question_id == Question.id) \
+         .filter(ExamAnswer.exam_record_id == record.id) \
+         .group_by(Question.question_type).all()
+        return {qt: float(total or 0) for qt, total in rows}
+
+    # 组装行：姓名（无 name 回退用户名）、各题型得分、总成绩；按总成绩降序
+    rows = []
+    for rec in submissions:
+        ts = _type_scores_of(rec)
+        rows.append({
+            'name': rec.user.name or rec.user.username,
+            'type_scores': [ts.get(t, 0.0) for t in ordered_types],
+            'total': float(rec.obtained_score or 0),
+        })
+    rows.sort(key=lambda x: x['total'], reverse=True)
+
+    # 写 Excel
+    headers = ['序号', '姓名'] + [_question_type_label(t) for t in ordered_types] + ['总成绩']
+    wb = Workbook()
+    ws = wb.active
+    ws.title = '成绩单'
+    ws.append(headers)
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+    for idx, r in enumerate(rows, 1):
+        ws.append([idx, r['name'],
+                  *[round(v, 2) for v in r['type_scores']],
+                  round(r['total'], 2)])
+
+    # 列宽粗略自适应（表头与各单元格内容取最长 + 留白）
+    for col_idx, col_cells in enumerate(ws.iter_cols(values_only=True), 1):
+        max_len = max((len(str(c)) for c in col_cells if c is not None), default=8)
+        ws.column_dimensions[
+            ws.cell(row=1, column=col_idx).column_letter
+        ].width = max_len + 4
+
+    def _safe(name):
+        import re
+        return re.sub(r'[\\/:*?"<>|]', '', str(name))
+
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    filename = f"{_safe(paper.name)}_{_safe(cls.name)}.xlsx"
+    return send_file(
+        buf,
+        as_attachment=True,
+        download_name=filename,
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    )
 
 
 # ============ 辅助 API ============

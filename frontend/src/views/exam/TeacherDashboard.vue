@@ -105,6 +105,54 @@ function reviewPaper(id) {
   router.push(`/exam/paper/${id}/review`)
 }
 
+// 是否可导出成绩：已结束 或 已有交卷记录（不限时卷无 end_time，靠交卷数判定）
+function canExport(p) {
+  return paperStatus(p) === 'ended' || (p.submitted_count || 0) > 0
+}
+
+// 读取 blob 形式的错误响应（服务端返回 JSON 但被 responseType:'blob' 包裹）
+async function readBlobError(err) {
+  try {
+    const data = err?.response?.data
+    if (data instanceof Blob && data.type && data.type.includes('json')) {
+      return JSON.parse(await data.text())?.error
+    }
+  } catch { /* 解析失败则回退默认提示 */ }
+  return err?.response?.data?.error
+}
+
+// 一键导出全部班级成绩：先取已交卷班级清单，再逐班下载 xlsx（顺序下载，
+// 降低浏览器「允许多次下载」弹窗概率）
+async function exportScores(p) {
+  try {
+    const { data: classes } = await api.get(`/exam/papers/${p.id}/score-classes`)
+    if (!classes.length) {
+      ElMessage.warning('该试卷暂无已交卷记录')
+      return
+    }
+    for (const c of classes) {
+      const res = await api.get(`/exam/papers/${p.id}/scores/export`, {
+        params: { class_id: c.class_id },
+        responseType: 'blob',
+      })
+      const url = URL.createObjectURL(new Blob([res.data], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      }))
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${p.name}_${c.class_name}.xlsx`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+    }
+    ElMessage.success(`已导出 ${classes.length} 个班级的成绩单`)
+  } catch (err) {
+    const msg = await readBlobError(err)
+    ElMessage.error(msg || '导出失败')
+  }
+}
+
 function fmtDate(s) {
   if (!s) return '—'
   return new Date(s).toLocaleString()
@@ -184,6 +232,13 @@ onMounted(loadPapers)
               effect="plain"
               @click="reviewPaper(p.id)"
             >试卷回顾</el-button>
+            <el-button
+              v-if="canExport(p)"
+              size="small"
+              type="success"
+              effect="plain"
+              @click="exportScores(p)"
+            >成绩导出</el-button>
           </div>
         </el-card>
       </el-col>
@@ -272,5 +327,8 @@ onMounted(loadPapers)
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
+  /* 多行换行时左对齐，避免按钮被两端分散排列 */
+  justify-content: flex-start;
+  align-items: flex-start;
 }
 </style>
